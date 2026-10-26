@@ -60,6 +60,19 @@ N: android=http://schemas.android.com/apk/res/android (line=2)
           A: android:value(0x01010024)="LIBGL_ES=3:RENDERER_BACKEND=gles" (Raw: "LIBGL_ES=3:RENDERER_BACKEND=gles")
 """
 
+# aapt2 of build-tools 37 prints attribute names as full namespace URIs.
+XMLTREE_URIS = XMLTREE.replace(
+    "A: android:name(0x01010003)", "A: http://schemas.android.com/apk/res/android:name(0x01010003)"
+).replace(
+    "A: android:value(0x01010024)", "A: http://schemas.android.com/apk/res/android:value(0x01010024)"
+).replace(
+    "A: android:resource(0x01010031)", "A: http://schemas.android.com/apk/res/android:resource(0x01010031)"
+).replace(
+    "A: android:exported(0x0105100e)", "A: http://schemas.android.com/apk/res/android:exported(0x0105100e)"
+).replace(
+    "A: android:hasCode(0x0101000e)", "A: http://schemas.android.com/apk/res/android:hasCode(0x0101000e)"
+)
+
 BADGING = """package: name='np.com.gurkha.rustgl.plugin' versionCode='1' \
 versionName='0.3.0-gurkha.1' compileSdkVersion='34' compileSdkVersionCodename='14'
 sdkVersion:'26'
@@ -73,11 +86,12 @@ native-code: 'arm64-v8a' 'armeabi-v7a' 'x86' 'x86_64'
 
 class XmlTreeTests(unittest.TestCase):
     def test_meta_data_values(self):
-        meta = verify_apk.parse_meta_data(XMLTREE)
-        self.assertEqual(meta["fclPlugin"], "true")
-        self.assertEqual(meta["fclPlugin_V2"], "@resource")
-        self.assertEqual(meta["renderer"], "opengles3_rust:librust_gl.so:/librust_gl.so")
-        self.assertEqual(meta["pojavEnv"], "LIBGL_ES=3:RENDERER_BACKEND=gles")
+        for sample in (XMLTREE, XMLTREE_URIS):
+            meta = verify_apk.parse_meta_data(sample)
+            self.assertEqual(meta["fclPlugin"], "true", sample.splitlines()[0])
+            self.assertEqual(meta["fclPlugin_V2"], "@resource")
+            self.assertEqual(meta["renderer"], "opengles3_rust:librust_gl.so:/librust_gl.so")
+            self.assertEqual(meta["pojavEnv"], "LIBGL_ES=3:RENDERER_BACKEND=gles")
 
     def test_attribute_value_forms(self):
         self.assertEqual(verify_apk.attribute_value('"text" (Raw: "text")'), "text")
@@ -87,16 +101,17 @@ class XmlTreeTests(unittest.TestCase):
 
     def test_manifest_contract_against_the_sample(self):
         """The checks that gate the build must accept the shipped manifest."""
-        meta = verify_apk.parse_meta_data(XMLTREE)
-        for key in verify_apk.REQUIRED_META:
-            self.assertIn(key, meta)
-        self.assertTrue(meta["fclPlugin_V2"].startswith("@"))
-        renderer_id, gl_name, egl_name = meta["renderer"].split(":")
-        self.assertTrue(egl_name.startswith("/"))
-        self.assertTrue(gl_name.endswith(".so"))
-        self.assertIn("android.intent.action.MAIN", XMLTREE)
-        self.assertRegex(XMLTREE, r"android:exported\(0x[0-9a-fA-F]+\)=true")
-        self.assertIsNone(verify_apk.re.search(r"E: uses-permission", XMLTREE))
+        for sample in (XMLTREE, XMLTREE_URIS):
+            meta = verify_apk.parse_meta_data(sample)
+            for key in verify_apk.REQUIRED_META:
+                self.assertIn(key, meta)
+            self.assertTrue(meta["fclPlugin_V2"].startswith("@"))
+            renderer_id, gl_name, egl_name = meta["renderer"].split(":")
+            self.assertTrue(egl_name.startswith("/"))
+            self.assertTrue(gl_name.endswith(".so"))
+            self.assertIn("android.intent.action.MAIN", sample)
+            self.assertRegex(sample, r":exported\(0x[0-9a-fA-F]+\)=true")
+            self.assertIsNone(verify_apk.re.search(r"E: uses-permission", sample))
 
     def test_badging_is_accepted_from_old_and_new_aapt2(self):
         new_aapt2 = BADGING.replace("sdkVersion:'26'", "minSdkVersion:'26'")

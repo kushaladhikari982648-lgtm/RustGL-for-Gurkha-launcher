@@ -118,7 +118,12 @@ def check_badging(aapt2: Path, apk: Path, expected_version: str) -> None:
     print("badging OK: package, version, SDK range, label, launchable activity")
 
 
-ATTRIBUTE = re.compile(r"A: ([\w:]+)\(0x[0-9a-fA-F]+\)=(.*)")
+ATTRIBUTE = re.compile(r"A: (\S+)\(0x[0-9a-fA-F]+\)=(.*)")
+
+
+def attribute_name(raw: str) -> str:
+    """aapt2 prints either `android:name` or the full `http://.../android:name`."""
+    return raw.split("/")[-1]
 
 
 def attribute_value(raw: str):
@@ -144,12 +149,12 @@ def parse_meta_data(xml: str) -> dict:
     attributes = []
     for line in lines:
         match = ATTRIBUTE.search(line)
-        attributes.append((match.group(1), attribute_value(match.group(2)))
+        attributes.append((attribute_name(match.group(1)), attribute_value(match.group(2)))
                           if match else None)
     meta = {}
     for index, line in enumerate(lines):
         match = ATTRIBUTE.search(line)
-        if not match or match.group(1) != "android:name":
+        if not match or attribute_name(match.group(1)) != "android:name":
             continue
         key = attribute_value(match.group(2))
         for offset in (1, 2, -1, -2):
@@ -199,7 +204,7 @@ def check_manifest(aapt2: Path, apk: Path) -> dict:
     if DISCOVERY_ACTION not in xml:
         raise SystemExit("the manifest must declare an ACTION_MAIN activity: FCL and "
                          "Zalith Launcher 2 find plugins with queryIntentActivities")
-    if not re.search(r"android:exported\(0x[0-9a-fA-F]+\)=true", xml):
+    if not re.search(r":exported\(0x[0-9a-fA-F]+\)=true", xml):
         raise SystemExit("the discovery activity must be exported")
     if re.search(r"E: uses-permission", xml):
         raise SystemExit("the plugin must not request permissions")
