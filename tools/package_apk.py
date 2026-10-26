@@ -104,13 +104,17 @@ def android_jar(sdk: Path, minimum: int = 34) -> Path:
 
 
 def java_home() -> Path:
-    home = os.environ.get("JAVA_HOME")
-    if home:
-        return Path(home)
+    """A JDK (not a JRE): javac for the Activity, keytool for the signing key."""
+    candidates = []
+    if os.environ.get("JAVA_HOME"):
+        candidates.append(Path(os.environ["JAVA_HOME"]))
     which = shutil.which("javac")
     if which:
-        return Path(which).resolve().parent.parent
-    raise SystemExit("JAVA_HOME is not set and javac is not on PATH")
+        candidates.append(Path(which).resolve().parent.parent)
+    for candidate in candidates:
+        if (candidate / "bin" / "javac").exists() and (candidate / "bin" / "keytool").exists():
+            return candidate
+    raise SystemExit("No JDK with javac and keytool found (set JAVA_HOME)")
 
 
 def escape_resource_text(text: str) -> str:
@@ -331,7 +335,7 @@ def main() -> int:
     aapt2 = tool(args.sdk, "aapt2")
     zipalign = tool(args.sdk, "zipalign")
     apksigner = tool(args.sdk, "apksigner")
-    d8 = tool(args.sdk, "lib" / "d8.jar")
+    d8 = tool(args.sdk, "lib/d8.jar")
     javac = java_home() / "bin" / "javac"
     java = java_home() / "bin" / "java"
 
