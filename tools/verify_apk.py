@@ -45,12 +45,15 @@ def run(*command) -> str:
                           capture_output=True, text=True).stdout
 
 
-def tool(sdk: Path, name: str) -> Path:
+def tool(sdk: Path, name: str, preferred: str = "35.0.0") -> Path:
+    """Prefer a known-good build-tools version, otherwise the newest one."""
     root = sdk / "build-tools"
     versions = sorted((p for p in root.iterdir() if p.is_dir()),
                       key=lambda p: [int(c) if c.isdigit() else c for c in p.name.split(".")],
                       reverse=True)
-    for version in versions:
+    order = [p for p in versions if p.name == preferred] + \
+            [p for p in versions if p.name != preferred]
+    for version in order:
         candidate = version / name
         if candidate.exists():
             return candidate
@@ -113,12 +116,54 @@ def check_badging(aapt2: Path, apk: Path, expected_version: str) -> None:
     print("badging OK: package, version, SDK range, label, launchable activity")
 
 
+ATTRIBUTE = re.compile(r"A: ([\w:]+)\(0x[0-9a-fA-F]+\)=(.*)")
+
+
+def attribute_value(raw: str):
+    """aapt2 prints ="text" (Raw: "text"), =true/false, =26 and =@0x7f040000."""
+    raw = raw.strip()
+    if raw.startswith('"'):
+        return raw[1:raw.index('"', 1)]
+    if raw.startswith("@0x"):
+        return "@resource"
+    return raw
+
+
+def parse_meta_data(xml: str) -> dict:
+    """Read the <meta-data> entries out of `aapt2 dump xmltree`.
+
+    aapt2 prints one attribute per line right after its element, e.g.
+
+        E: meta-data (line=40)
+          A: android:name(0x01010003)="fclPlugin" (Raw: "fclPlugin")
+          A: android:value(0x01010024)="true" (Raw: "true")
+    """
+    lines = xml.splitlines()
+    attributes = []
+    for line in lines:
+        match = ATTRIBUTE.search(line)
+        attributes.append((match.group(1), attribute_value(match.group(2)))
+                          if match else None)
+    meta = {}
+    for index, line in enumerate(lines):
+        match = ATTRIBUTE.search(line)
+        if not match or match.group(1) != "android:name":
+            continue
+        key = attribute_value(match.group(2))
+        for offset in (1, 2, -1, -2):
+            position = index + offset
+            if not 0 <= position < len(attributes) or attributes[position] is None:
+                continue
+            name, value = attributes[position]
+            if name in ("android:value", "android:resource"):
+                meta[key] = value
+                break
+    return meta
+
+
 def check_manifest(aapt2: Path, apk: Path) -> dict:
     xml = run(aapt2, "dump", "xmltree", apk, "--file", "AndroidManifest.xml")
-    meta = {}
-    for match in re.finditer(r'N: android:name="([^"]+)"[^"]*\n\s*A: android:(?:value|resource)="([^"]*)"',
-                             xml):
-        meta[match.group(1)] = match.group(2)
+    meta = parse_meta_data(xml)
     missing = [key for key in REQUIRED_META if key not in meta]
     if missing:
         raise SystemExit(f"manifest is missing meta-data {missing}\n{xml}")
@@ -152,9 +197,9 @@ def check_manifest(aapt2: Path, apk: Path) -> dict:
     if DISCOVERY_ACTION not in xml:
         raise SystemExit("the manifest must declare an ACTION_MAIN activity: FCL and "
                          "Zalith Launcher 2 find plugins with queryIntentActivities")
-    if 'android:exported="true"' not in xml:
+    if not re.search(r"android:exported\(0x[0-9a-fA-F]+\)=true", xml):
         raise SystemExit("the discovery activity must be exported")
-    if "uses-permission" in xml:
+    if re.search(r"E: uses-permission", xml):
         raise SystemExit("the plugin must not request permissions")
     print("manifest OK: v2 + v1 contracts, no permissions, ACTION_MAIN activity")
     return meta

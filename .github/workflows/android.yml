@@ -132,6 +132,23 @@ jobs:
               --metadata "$RUNNER_TEMP/native-metadata.json" --output artifacts/release
             python3 tools/verify_apk.py artifacts/release/*.apk --sdk "$ANDROID_HOME"
           } 2>&1 | tee "$RUNNER_TEMP/package.log"
+      - name: Report the packaging failure
+        if: failure()
+        run: |
+          python3 - "$RUNNER_TEMP/package.log" <<'PY'
+          import pathlib, sys
+          path = pathlib.Path(sys.argv[1])
+          text = path.read_text(errors="replace") if path.exists() else "Packaging log missing"
+          text = text[-3000:].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+          print("::error title=RustGL plugin packaging failed::" + text)
+          PY
+      - name: Upload the packaging log when it fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustgl-packaging-log
+          path: ${{ runner.temp }}/package.log
+          if-no-files-found: warn
       - name: Show the packaged artifacts
         run: |
           ls -l artifacts/release
@@ -162,6 +179,14 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
           NOTES="$RUNNER_TEMP/release-notes.md"
+          if [ -n "${{ secrets.APK_KEYSTORE_BASE64 }}" ]; then
+            SIGNING="Signed with the repository release key, so later releases update in place."
+          else
+            SIGNING="Signed with a key generated for this build: no APK_KEYSTORE_BASE64 secret is
+          configured for this repository, so a later release has to be installed after
+          uninstalling this one. Uninstalling the plugin only removes the renderer entry;
+          the launcher and Minecraft data are untouched."
+          fi
           {
             echo "Universal RustGL renderer plugin APK for Android launchers."
             echo
@@ -174,6 +199,10 @@ jobs:
             echo
             echo "Experimental: not validated on every launcher, GPU or Minecraft"
             echo "version. Test a clean instance and keep your previous renderer."
+            echo
+            echo "## Signing"
+            echo
+            echo "$SIGNING"
             echo
             echo "## Checksums"
             echo
