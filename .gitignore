@@ -1,3 +1,10 @@
 /target
 Cargo.lock
 /.idea
+
+# Renderer workspace (rustgl/) keeps its own Cargo.lock; build output is ignored
+/rustgl/target
+/artifacts
+.gradle
+
+__pycache__/

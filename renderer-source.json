@@ -1,0 +1,17 @@
+{
+  "renderer": "RustGL",
+  "library": "librust_gl.so",
+  "path": "rustgl",
+  "repository": "https://github.com/kushaladhikari982648-lgtm/Gurkha-launcher",
+  "branch": "arena/a8e9723f-gurkha-launcher",
+  "commit": "1726782a7989bdf9b5e50e2f3154ae2cfee06fdb",
+  "commitDate": "2026-10-24T08:00:22Z",
+  "treeHash": "bbeac11aa95dff9509a8d91c6cb6477168cff206",
+  "upstream": {
+    "repository": "https://github.com/whaltermc/rust-renderer",
+    "revision": "eb22559",
+    "note": "The renderer source vendored by Gurkha Launcher; upstream publishes no license file."
+  },
+  "syncedAt": "2026-10-26",
+  "verify": "python3 tools/check_sync.py"
+}
