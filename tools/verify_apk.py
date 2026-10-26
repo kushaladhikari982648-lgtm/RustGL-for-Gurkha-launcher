@@ -103,7 +103,6 @@ def check_badging(aapt2: Path, apk: Path, expected_version: str) -> None:
     needed = [
         "package: name='np.com.gurkha.rustgl.plugin'",
         f"versionName='{expected_version}'",
-        "sdkVersion:'26'",
         "targetSdkVersion:'34'",
         "launchable-activity: name='np.com.gurkha.rustgl.plugin.MainActivity'",
         "application-label:'RustGL (Gurkha build)'",
@@ -111,6 +110,9 @@ def check_badging(aapt2: Path, apk: Path, expected_version: str) -> None:
     for needle in needed:
         if needle not in badging:
             raise SystemExit(f"aapt2 badging is missing {needle!r}\n{badging}")
+    # aapt2 of build-tools 37 renamed sdkVersion to minSdkVersion in this output.
+    if "sdkVersion:'26'" not in badging and "minSdkVersion:'26'" not in badging:
+        raise SystemExit(f"aapt2 badging does not report minSdkVersion 26\n{badging}")
     if "uses-permission:" in badging:
         raise SystemExit(f"The plugin must not request permissions:\n{badging}")
     print("badging OK: package, version, SDK range, label, launchable activity")

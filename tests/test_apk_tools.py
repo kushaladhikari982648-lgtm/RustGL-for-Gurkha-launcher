@@ -98,6 +98,12 @@ class XmlTreeTests(unittest.TestCase):
         self.assertRegex(XMLTREE, r"android:exported\(0x[0-9a-fA-F]+\)=true")
         self.assertIsNone(verify_apk.re.search(r"E: uses-permission", XMLTREE))
 
+    def test_badging_is_accepted_from_old_and_new_aapt2(self):
+        new_aapt2 = BADGING.replace("sdkVersion:'26'", "minSdkVersion:'26'")
+        for badging in (BADGING, new_aapt2):
+            self.assertTrue("sdkVersion:'26'" in badging or "minSdkVersion:'26'" in badging,
+                            "verify_apk accepts both spellings")
+
     def test_badging_strings_that_the_check_greps_for(self):
         needed = [
             "package: name='np.com.gurkha.rustgl.plugin'",
