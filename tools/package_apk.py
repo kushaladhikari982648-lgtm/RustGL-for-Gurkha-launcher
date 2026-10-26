@@ -386,6 +386,11 @@ def main() -> int:
             "--out", apk, aligned, env=environment)
         run(apksigner, "verify", "--verbose", "--print-certs", apk)
         check_alignment(zipalign, apk)
+        # apksigner leaves <apk>.idsig next to the output: that file is only used
+        # for incremental (streamed) installs over adb, never for a normal one.
+        idsig = apk.with_suffix(apk.suffix + ".idsig")
+        if idsig.exists():
+            idsig.unlink()
         run(aapt2, "dump", "badging", apk)
 
         if ephemeral:

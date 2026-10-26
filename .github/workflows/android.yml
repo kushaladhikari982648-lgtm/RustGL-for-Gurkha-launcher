@@ -214,5 +214,5 @@ jobs:
             gh release upload "$TAG" artifacts/release/* --clobber
           else
             gh release create "$TAG" --title "RustGL universal plugin $TAG" \
-              --notes-file "$NOTES" artifacts/release/*
+              --target "$GITHUB_SHA" --notes-file "$NOTES" artifacts/release/*
           fi
