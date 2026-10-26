@@ -18,7 +18,9 @@ inside the launcher: the activity only explains the plugin and holds no settings
 
 ## Install
 
-1. Download `rustgl-universal-<version>.apk` from the release.
+1. Download `rustgl-universal-<version>.apk` from
+   <https://github.com/kushaladhikari982648-lgtm/RustGL-for-Gurkha-launcher/releases/latest>
+   and check it against `SHA256SUMS` of the same release.
 2. Allow installation from your browser or file manager if Android asks.
 3. Install it, then **fully close and reopen the launcher** (plugin lists are
    cached per process).

@@ -36,6 +36,11 @@ Both FCL and Zalith Launcher 2 discover plugins with
 exported `Activity` that explains the plugin - that is what makes it visible to
 them, and the reason this plugin is not a pure native package.
 
+**Download:** <https://github.com/kushaladhikari982648-lgtm/RustGL-for-Gurkha-launcher/releases/latest>
+- install `rustgl-universal-<version>.apk` (2.3 MB, four ABIs in one file),
+- or `rustgl-local-import.zip` for launchers that import renderer folders,
+- or `rustgl-gurkha-<abi>.zip` for a bare `librust_gl.so`.
+
 Install, selection and honest limitations: **[docs/UNIVERSAL_APK.md](docs/UNIVERSAL_APK.md)**.
 
 ## Build it yourself
