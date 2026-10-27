@@ -30,13 +30,15 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="np.com.gurkha.rustgl.plugin"
-    android:versionCode="1"
-    android:versionName="0.3.0-gurkha.1">
+    android:versionCode="2"
+    android:versionName="0.3.0-gurkha.2">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
     <!-- No permissions: the plugin never touches the network, storage or accounts. -->
     <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:hasCode="true"
         android:allowBackup="false"
@@ -71,18 +73,31 @@
             android:name="rustgl_spoof_title"
             android:resource="@string/rustgl_spoof_title" />
 
-        <!-- RendererPlugin v1 (Zalith/Gurkha, FCL legacy, Pojav-family forks). -->
+        <!-- RendererPlugin v1 markers. Every v1 reader in the wild uses one of
+             these three names: fclPlugin (FCL, Zalith/Gurkha, NuxLauncher, ...),
+             zalithRendererPlugin (Zalith forks) and pgwRendererPlugin (Pojav
+             Glow.Worm lineage: PojavLauncher-Beta-Zink, NRC for Android). -->
         <meta-data
             android:name="fclPlugin"
             android:value="true" />
         <meta-data
             android:name="zalithRendererPlugin"
             android:value="true" />
+        <meta-data
+            android:name="pgwRendererPlugin"
+            android:value="true" />
+        <!-- H2CO3 Launcher (and the Boat family) read their own marker and env. -->
+        <meta-data
+            android:name="h2co3LauncherPlugin"
+            android:value="true" />
 
-        <!-- id:gl:egl - see the note at the top of this file about the leading "/" -->
+        <!-- id:gl:egl - see the note at the top of this file about the leading "/".
+             The id is "opengles3", the value every launcher already understands:
+             launchers derive GL context hints and EGL handling from it, and a
+             private id such as "opengles3_rust" makes that code fall through. -->
         <meta-data
             android:name="renderer"
-            android:value="opengles3_rust:librust_gl.so:/librust_gl.so" />
+            android:value="opengles3:librust_gl.so:/librust_gl.so" />
         <meta-data
             android:name="des"
             android:value="RustGL (Gurkha build) - OpenGL 4.5 surface on OpenGL ES 3 [v1 plugin API]" />
@@ -94,9 +109,19 @@
              v1 entry on 1.16 or older. -->
         <meta-data
             android:name="pojavEnv"
-            android:value="LIBGL_ES=3:RENDERER_BACKEND=gles:RENDERER_SPOOF_GL=1:POJAV_RENDERER=opengles3_rust" />
+            android:value="LIBGL_ES=3:RENDERER_BACKEND=gles:RENDERER_SPOOF_GL=1:POJAV_RENDERER=opengles3" />
         <meta-data
             android:name="boatEnv"
-            android:value="LIBGL_ES=3:RENDERER_BACKEND=gles:RENDERER_SPOOF_GL=1:POJAV_RENDERER=opengles3_rust" />
+            android:value="LIBGL_ES=3:RENDERER_BACKEND=gles:RENDERER_SPOOF_GL=1:POJAV_RENDERER=opengles3" />
+        <meta-data
+            android:name="h2co3Env"
+            android:value="LIBGL_ES=3:RENDERER_BACKEND=gles:RENDERER_SPOOF_GL=1:POJAV_RENDERER=opengles3" />
+        <!-- Empty means "every version"; some readers require the keys to exist. -->
+        <meta-data
+            android:name="minMCVer"
+            android:value="" />
+        <meta-data
+            android:name="maxMCVer"
+            android:value="" />
     </application>
 </manifest>

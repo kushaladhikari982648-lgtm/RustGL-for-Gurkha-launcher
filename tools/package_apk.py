@@ -39,6 +39,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "android-plugin"
+PLUGIN_RES = PLUGIN / "res"
 MANIFEST = PLUGIN / "AndroidManifest.xml"
 CONFIG = PLUGIN / "renderer-config.json"
 JAVA_SOURCE = PLUGIN / "java"
@@ -342,6 +343,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as raw:
         tmp = Path(raw)
         res = tmp / "res"
+        # Committed resources (launcher icon, adaptive icon XML, colours) first,
+        # then the generated strings: the v2 renderer config is a string resource.
+        if PLUGIN_RES.is_dir():
+            shutil.copytree(PLUGIN_RES, res)
         write_strings(res, config_json, version_name)
         compiled = tmp / "compiled-resources.zip"
         run(aapt2, "compile", "--dir", res, "-o", compiled)

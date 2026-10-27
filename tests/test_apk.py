@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 import package_apk  # noqa: E402
+import verify_apk  # noqa: E402
 from check_sync import tree_hash  # noqa: E402
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
@@ -77,13 +78,26 @@ class ManifestTests(unittest.TestCase):
         values = meta_data()
         # v2 (Zalith Launcher 2, FCL): a string resource holding the JSON config.
         self.assertTrue(values["fclPlugin_V2"].startswith("@string/"))
-        # v1 (Zalith/Gurkha, FCL legacy path, Pojav-family forks).
-        self.assertEqual(values["fclPlugin"], "true")
-        self.assertEqual(values["zalithRendererPlugin"], "true")
+        # v1 markers: one per family of launchers that reads this contract.
+        for marker in ("fclPlugin", "zalithRendererPlugin", "pgwRendererPlugin",
+                       "h2co3LauncherPlugin"):
+            self.assertEqual(values[marker], "true", marker)
+            self.assertTrue(marker in verify_apk.REQUIRED_META, marker)
+        # Some readers require the version-range keys even when they are empty.
+        for key in verify_apk.OPTIONAL_META:
+            self.assertIn(key, values)
+            self.assertEqual(values[key], "")
+
+    def test_every_v1_launcher_marker_is_verified_in_the_built_apk(self):
+        """tools/verify_apk.py is what gates a release: it must not drift."""
+        values = meta_data()
+        for key in verify_apk.REQUIRED_META:
+            self.assertIn(key, values, f"verify_apk requires {key} but the manifest lacks it")
 
     def test_v1_renderer_triple(self):
         renderer_id, gl_name, egl_name = meta_data()["renderer"].split(":")
-        self.assertEqual(renderer_id, "opengles3_rust")
+        # "opengles3" is the id every launcher understands; MobileGL uses it too.
+        self.assertEqual(renderer_id, "opengles3")
         self.assertEqual(gl_name, "librust_gl.so")
         # A leading "/" is what makes every documented v1 launcher prepend the
         # plugin's nativeLibraryDir; a bare name only resolves by luck.
@@ -91,7 +105,7 @@ class ManifestTests(unittest.TestCase):
         self.assertEqual(egl_name.lstrip("/"), "librust_gl.so")
 
     def test_v1_environment_is_parseable(self):
-        for key in ("pojavEnv", "boatEnv"):
+        for key in ("pojavEnv", "boatEnv", "h2co3Env"):
             entries = meta_data()[key].split(":")
             self.assertTrue(entries)
             for entry in entries:
@@ -100,7 +114,7 @@ class ManifestTests(unittest.TestCase):
                 self.assertNotIn("=", value,
                                  f"{key}: Zalith's v1 parser truncates at the second '='")
                 self.assertNotIn(":", value, f"{key}: values are split on ':'")
-            self.assertIn("POJAV_RENDERER=opengles3_rust", entries, key)
+            self.assertIn("POJAV_RENDERER=opengles3", entries, key)
             self.assertIn("LIBGL_ES=3", entries, key)
 
     def test_env_titles_of_the_v2_config_have_manifest_entries(self):
@@ -121,12 +135,15 @@ class RendererConfigTests(unittest.TestCase):
         for key in ("displayName", "rendererId", "rendererGLPath", "rendererEGLPath",
                     "dlopenLibPaths", "env", "minMCVer", "maxMCVer"):
             self.assertIn(key, self.config)
+        self.assertEqual(self.config["rendererId"], "opengles3")
 
     def test_library_paths(self):
         # "**|" is replaced with the plugin's nativeLibraryDir by both launchers.
         self.assertTrue(self.config["rendererGLPath"].startswith("**|"))
         self.assertEqual(self.config["rendererGLPath"], "**|librust_gl.so")
-        self.assertTrue(self.config["rendererEGLPath"].endswith("librust_gl.so"))
+        # The EGL library must be resolved the same way: a bare name only loads
+        # if the game process happens to have the plugin's library dir on its path.
+        self.assertEqual(self.config["rendererEGLPath"], "**|librust_gl.so")
         self.assertEqual(self.config["dlopenLibPaths"], [])
 
     def test_environment(self):
@@ -151,6 +168,24 @@ class RendererConfigTests(unittest.TestCase):
         self.assertNotIn('"', escaped.replace('\\"', ""))
         for entry in self.config["env"]:
             self.assertIn(f'\\"type\\":\\"{entry["type"]}\\"', escaped)
+
+
+class IconTests(unittest.TestCase):
+    """Launchers call PackageManager.loadIcon(): a plugin without one looks broken."""
+
+    def test_adaptive_icon_resources_exist(self):
+        res = ROOT / "android-plugin" / "res"
+        self.assertTrue((res / "mipmap-anydpi-v26" / "ic_launcher.xml").is_file())
+        for density in ("mdpi", "hdpi", "xhdpi", "xxhdpi", "xxxhdpi"):
+            icon = res / f"mipmap-{density}" / "ic_launcher_foreground.png"
+            self.assertTrue(icon.is_file(), icon)
+            self.assertTrue(icon.read_bytes().startswith(b"\x89PNG"))
+        self.assertIn("ic_launcher_background", (res / "values" / "colors.xml").read_text())
+
+    def test_the_application_references_the_icon(self):
+        application = ET.parse(MANIFEST).getroot().find("application")
+        self.assertEqual(application.get(ANDROID + "icon"), "@mipmap/ic_launcher")
+        self.assertEqual(application.get(ANDROID + "roundIcon"), "@mipmap/ic_launcher")
 
 
 class PackagingTests(unittest.TestCase):

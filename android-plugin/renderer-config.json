@@ -1,8 +1,8 @@
 {
   "displayName": "RustGL (Gurkha build)",
-  "rendererId": "opengles3_rust",
+  "rendererId": "opengles3",
   "rendererGLPath": "**|librust_gl.so",
-  "rendererEGLPath": "librust_gl.so",
+  "rendererEGLPath": "**|librust_gl.so",
   "dlopenLibPaths": [],
   "env": [
     {

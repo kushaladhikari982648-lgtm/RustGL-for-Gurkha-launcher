@@ -1,5 +1,7 @@
 # RustGL for Gurkha Launcher
 
+<p align="center"><img src="docs/icon.png" alt="RustGL plugin icon" width="128"></p>
+
 The **RustGL** renderer - a desktop-OpenGL-to-OpenGL-ES compatibility layer
 written in Rust - and the packager that turns it into a **universal renderer
 plugin APK** for Minecraft: Java Edition launchers on Android.
@@ -24,17 +26,25 @@ armeabi-v7a, x86 and x86_64** in one package and declares the plugin contracts
 used by the Pojav-family launchers, so the same file can be installed and
 selected as a renderer in:
 
-* **Zalith Launcher 2** and **Zalith Launcher 1 / Gurkha Launcher**
-* **FCL (Fold Craft Launcher)**
-* **Pojav-family forks** that kept the FCL plugin reader (Mojo Launcher and
-  others)
+* **Zalith Launcher 2** and its forks (TurboCraft, Cubiq, Hyper Launcher v3 …)
+* **Zalith Launcher 1 / Gurkha Launcher** and their forks
+* **FCL (Fold Craft Launcher)** and **NuxLauncher**
+* **Pojav Glow·Worm lineage**: PojavLauncher-Beta-Zink, NRC for Android
+* **H2CO3 Launcher** and the Boat family (`h2co3LauncherPlugin` + `h2co3Env`)
 * launchers with no plugin loader at all, through the per-ABI ZIP or the
   local-import ZIP published next to it
 
-Both FCL and Zalith Launcher 2 discover plugins with
-`queryIntentActivities(Intent.ACTION_MAIN)`, so the APK also contains a tiny
-exported `Activity` that explains the plugin - that is what makes it visible to
-them, and the reason this plugin is not a pure native package.
+All of those launchers discover plugins with
+`PackageManager.queryIntentActivities(Intent.ACTION_MAIN)`, so the APK also
+contains a tiny exported `Activity` that explains the plugin - that is what makes
+it visible to them, and the reason this plugin is not a pure native package.
+
+Each launcher family looks for a different marker, and the APK declares all of
+them: `fclPlugin_V2` (v2 JSON config), `fclPlugin`, `zalithRendererPlugin`,
+`pgwRendererPlugin`, `h2co3LauncherPlugin` + `h2co3Env`, plus `boatEnv`,
+`renderer`, `des`, `pojavEnv`, `minMCVer` and `maxMCVer`. The renderer id is
+`opengles3`, the value those launchers already recognise for an OpenGL ES 3
+renderer.
 
 **Download:** <https://github.com/kushaladhikari982648-lgtm/RustGL-for-Gurkha-launcher/releases/latest>
 - install `rustgl-universal-<version>.apk` (2.3 MB, four ABIs in one file),

@@ -1,15 +1,27 @@
 # RustGL universal renderer plugin APK
 
 One installable APK (`rustgl-universal-<version>.apk`) carries `librust_gl.so`
-for **arm64-v8a, armeabi-v7a, x86 and x86_64** and speaks three distribution
-contracts at once, so the same file works as a renderer plugin in the
-Pojav-family launchers that have a plugin loader.
+for **arm64-v8a, armeabi-v7a, x86 and x86_64** and speaks every renderer-plugin
+contract in use, so the same file is picked up by the different launchers
+instead of only one of them.
 
 | Contract | Meta-data | Launchers that read it |
 |---|---|---|
-| RendererPlugin **v2** | `fclPlugin_V2` -> string resource with a JSON config | Zalith Launcher 2 (upstream `ZalithLauncher/ZalithLauncher2`), FCL (Fold Craft Launcher) |
-| RendererPlugin **v1** | `fclPlugin` / `zalithRendererPlugin`, `renderer`, `des`, `pojavEnv`, `boatEnv` | Zalith Launcher 1 and its forks (Gurkha Launcher, …), FCL's legacy path, Pojav-family forks that kept the FCL v1 reader (Mojo Launcher and others), Boat/MCinaBox-style readers through `boatEnv` |
-| Bare native library | `lib/<abi>/librust_gl.so` | any launcher: use the per-ABI ZIP or the local-import ZIP from the release |
+| RendererPlugin **v2** | `fclPlugin_V2` -> string resource with a JSON config | Zalith Launcher 2 (`ZalithLauncher/ZalithLauncher2`) and its forks (TurboCraft, Cubiq, Hyper Launcher v3, …), FCL (Fold Craft Launcher), NuxLauncher |
+| RendererPlugin **v1** - FCL/Zalith marker | `fclPlugin` | FCL, Zalith Launcher 1 and forks (Gurkha Launcher, …), NuxLauncher, H2CO3's Pojav backend |
+| RendererPlugin **v1** - Zalith marker | `zalithRendererPlugin` | Zalith/Gurkha forks, Pojav builds that merged movtery's plugin code |
+| RendererPlugin **v1** - Pojav Glow·Worm marker | `pgwRendererPlugin` | Pojav Glow·Worm lineage: PojavLauncher-Beta-Zink, NRC for Android |
+| RendererPlugin **v1** - H2CO3/Boat marker | `h2co3LauncherPlugin` + `h2co3Env` | H2CO3 Launcher (and the Boat family it continues) |
+| Boat/MCinaBox env | `boatEnv` | Boat-style readers that ask for their own env list |
+| Local import / bare library | `lib/<abi>/librust_gl.so` | Launchers with no plugin loader at all: use the per-ABI ZIP or `rustgl-local-import.zip` from the release |
+
+All of these readers find the package the same way -
+`PackageManager.queryIntentActivities(Intent.ACTION_MAIN)` - which is why the APK
+ships a small exported information Activity instead of being a pure native
+package. The renderer id is `opengles3`, the value every one of them already
+knows (the id that MobileGL, the most widely installed third-party renderer
+plugin, also uses): launchers derive GL context hints and EGL handling from it,
+and a private id makes that code fall through to its defaults.
 
 Both FCL and Zalith Launcher 2 find plugins with
 `PackageManager.queryIntentActivities(Intent.ACTION_MAIN)`, so the APK ships a
@@ -25,9 +37,9 @@ inside the launcher: the activity only explains the plugin and holds no settings
 3. Install it, then **fully close and reopen the launcher** (plugin lists are
    cached per process).
 4. In the Minecraft version settings, pick **RustGL (Gurkha build)** as the
-   renderer. Launchers that read the v1 metadata show it as
-   *"RustGL (Gurkha build) - OpenGL 4.5 surface on OpenGL ES 3 [v1 plugin API]"*
-   - that is the same renderer, through the older plugin API.
+   renderer. Launchers that read the older v1 metadata show it under the `des`
+   text *"RustGL (Gurkha build) - OpenGL 4.5 surface on OpenGL ES 3 [v1 plugin
+   API]"* - the same renderer, through the older plugin API.
 5. Start the game. If it crashes or renders nothing, switch the version back to
    your previous renderer; nothing else is lost.
 
@@ -53,7 +65,7 @@ Environment the plugin sets (`pojavEnv` / v2 `env`):
 
 | Variable | Value | Meaning |
 |---|---|---|
-| `POJAV_RENDERER` | `opengles3_rust` | renderer id (from `rendererId` in v2) |
+| `POJAV_RENDERER` | `opengles3` | renderer id (from `rendererId` in v2): the id every launcher understands |
 | `LIBGL_ES` | `3` | create an OpenGL ES 3 context |
 | `RENDERER_BACKEND` | `gles` | GLES passthrough backend (the only one that draws) |
 | `RENDERER_SPOOF_GL` | `1` | report OpenGL 4.5 core to the game and mods |
@@ -73,8 +85,8 @@ Zalith truncates values at the second `=`. If you use the v1 entry on Minecraft
   shader fixtures, and GLES pixel read-backs against Mesa on the host); it has
   **not** been validated on every launcher, GPU or Minecraft version. Test a
   clean instance without mods or shader packs first.
-- **Launchers without a plugin loader** (stock PojavLauncher, and any fork that
-  predates the FCL plugin API) cannot use the APK at all. Use
+- **Launchers without a plugin loader** (stock PojavLauncher, Amethyst, and any
+  fork that predates the FCL plugin API) cannot use the APK at all. Use
   `rustgl-gurkha-<abi>.zip` (bare `librust_gl.so`) and the launcher's own
   "custom"/library mechanism, or `rustgl-local-import.zip` for launchers that
   import renderer folders (Zalith, Gurkha: *renderer plugins -> import local*).

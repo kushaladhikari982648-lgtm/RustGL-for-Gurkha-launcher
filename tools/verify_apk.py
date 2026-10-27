@@ -35,8 +35,15 @@ ABIS = {
     "x86": (1, 3),
     "x86_64": (2, 62),
 }
+# v2 marker, then every v1 marker seen in the launchers that read this contract:
+# fclPlugin (FCL, Zalith/Gurkha, NuxLauncher...), zalithRendererPlugin (Zalith
+# forks), pgwRendererPlugin (Pojav Glow.Worm lineage), h2co3LauncherPlugin
+# (H2CO3/Boat). H2CO3 also needs its own env, and several readers require the
+# version-range keys to exist even when they are empty.
 REQUIRED_META = ["fclPlugin_V2", "fclPlugin", "zalithRendererPlugin",
-                 "renderer", "des", "pojavEnv", "boatEnv"]
+                 "pgwRendererPlugin", "h2co3LauncherPlugin",
+                 "renderer", "des", "pojavEnv", "boatEnv", "h2co3Env"]
+OPTIONAL_META = ["minMCVer", "maxMCVer"]
 DISCOVERY_ACTION = "android.intent.action.MAIN"
 
 
@@ -115,6 +122,8 @@ def check_badging(aapt2: Path, apk: Path, expected_version: str) -> None:
         raise SystemExit(f"aapt2 badging does not report minSdkVersion 26\n{badging}")
     if "uses-permission:" in badging:
         raise SystemExit(f"The plugin must not request permissions:\n{badging}")
+    if "application-icon-" not in badging:
+        raise SystemExit(f"The plugin has no launcher icon:\n{badging}")
     print("badging OK: package, version, SDK range, label, launchable activity")
 
 
@@ -174,8 +183,10 @@ def check_manifest(aapt2: Path, apk: Path) -> dict:
     missing = [key for key in REQUIRED_META if key not in meta]
     if missing:
         raise SystemExit(f"manifest is missing meta-data {missing}\n{xml}")
-    if meta["fclPlugin"] != "true" or meta["zalithRendererPlugin"] != "true":
-        raise SystemExit(f"plugin markers must be true: {meta}")
+    for marker in ("fclPlugin", "zalithRendererPlugin", "pgwRendererPlugin",
+                   "h2co3LauncherPlugin"):
+        if meta[marker] != "true":
+            raise SystemExit(f"{marker} must be true: {meta}")
     if not meta["fclPlugin_V2"].startswith("@") and not meta["fclPlugin_V2"].isdigit():
         raise SystemExit(f"fclPlugin_V2 must be a resource reference, got {meta['fclPlugin_V2']}")
 
@@ -183,14 +194,15 @@ def check_manifest(aapt2: Path, apk: Path) -> dict:
     if len(parts) != 3:
         raise SystemExit(f"renderer must be <id>:<gl>:<egl>, got {meta['renderer']!r}")
     renderer_id, gl_name, egl_name = parts
-    if renderer_id != "opengles3_rust":
-        raise SystemExit(f"unexpected v1 renderer id {renderer_id!r}")
+    if renderer_id != "opengles3":
+        raise SystemExit(f"unexpected v1 renderer id {renderer_id!r}: launchers derive "
+                         "context hints from it, so it must be the id they know")
     if gl_name != "librust_gl.so":
         raise SystemExit(f"unexpected v1 GL library {gl_name!r}")
     if not egl_name.startswith("/") and egl_name != "librust_gl.so":
         raise SystemExit(f"v1 EGL library {egl_name!r} cannot be resolved by a launcher")
 
-    for key in ("pojavEnv", "boatEnv"):
+    for key in ("pojavEnv", "boatEnv", "h2co3Env"):
         for item in meta[key].split(":"):
             if "=" not in item:
                 raise SystemExit(f"{key} entry {item!r} has no '='")
@@ -236,12 +248,17 @@ def check_config(config: dict, meta: dict) -> None:
                 "dlopenLibPaths", "env", "minMCVer", "maxMCVer"):
         if key not in config:
             raise SystemExit(f"renderer config is missing {key!r}")
-    if config["rendererId"] != "opengles3_rust":
-        raise SystemExit(f"unexpected rendererId {config['rendererId']!r}")
+    if config["rendererId"] != "opengles3":
+        raise SystemExit(f"unexpected rendererId {config['rendererId']!r}: launchers "
+                         "derive context hints from it, so it must be the id they know")
     if config["rendererGLPath"] != "**|librust_gl.so":
         raise SystemExit("rendererGLPath must use the **| plugin-path prefix")
     if not config["rendererEGLPath"].endswith("librust_gl.so"):
         raise SystemExit("rendererEGLPath must point at librust_gl.so (it re-exports EGL)")
+    # MobileGL, the plugin that runs in the widest set of launchers, resolves both
+    # libraries through the **| prefix so the launcher never has to guess a path.
+    if not config["rendererEGLPath"].startswith("**|"):
+        raise SystemExit("rendererEGLPath must use the **| plugin-path prefix too")
 
     env_keys = set()
     for entry in config["env"]:
