@@ -200,6 +200,17 @@ jobs:
             echo "Experimental: not validated on every launcher, GPU or Minecraft"
             echo "version. Test a clean instance and keep your previous renderer."
             echo
+            # The tag's annotation is the changelog for that build: `git tag -a vX -m "..."`.
+            ANNOTATION=""
+            if git rev-parse -q --verify "refs/tags/$TAG" > /dev/null; then
+              ANNOTATION=$(git tag -l --format='%(contents:body)' "$TAG")
+            fi
+            if [ -n "$ANNOTATION" ]; then
+              echo "## What changed"
+              echo
+              echo "$ANNOTATION"
+              echo
+            fi
             echo "## Signing"
             echo
             echo "$SIGNING"
