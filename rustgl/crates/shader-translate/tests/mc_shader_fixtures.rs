@@ -599,7 +599,7 @@ void main() {
 
 /// Sodium-style chunk vertex shader: GLSL 330, one std140 block for the section offset that
 /// the mod updates per section, and plain uniforms for the matrices.
-const SODIUM_TERRAIN_VSH: &str = r#"#version 330
+const SODIUM_CHUNK_VSH_0_6: &str = r#"#version 330
 
 layout(std140) uniform ChunkOffset {
     vec4 u_ChunkOffset;
@@ -692,7 +692,7 @@ fn shader_pack_dialects_translate_and_keep_their_names() {
 
 #[test]
 fn sodium_chunk_shader_keeps_its_uniform_block() {
-    let out = assert_ok(SODIUM_TERRAIN_VSH);
+    let out = assert_ok(SODIUM_CHUNK_VSH_0_6);
     assert!(out.starts_with("#version 300 es"), "{out}");
     assert!(out.contains("layout(std140) uniform ChunkOffset"), "{out}");
     assert!(out.contains("vec4 u_ChunkOffset;"), "{out}");

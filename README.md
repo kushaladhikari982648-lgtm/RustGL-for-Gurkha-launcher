@@ -12,12 +12,13 @@ plugin APK** for Minecraft: Java Edition launchers on Android.
 
 | Path | What it is |
 |---|---|
-| `rustgl/` | The renderer: a Rust workspace whose `gl-compat` crate builds `librust_gl.so`. Synced unmodified from [`Gurkha Launcher`](https://github.com/kushaladhikari982648-lgtm/Gurkha-launcher) (`rustgl/`, branch `arena/a8e9723f-gurkha-launcher`, commit `1726782a`). `python3 tools/check_sync.py` proves the copy byte for byte. |
+| `rustgl/` | The renderer: a Rust workspace whose `gl-compat` crate builds `librust_gl.so`. Synced from [`Gurkha Launcher`](https://github.com/kushaladhikari982648-lgtm/Gurkha-launcher) (`rustgl/`, branch `arena/a8e9723f-gurkha-launcher`, commit `1726782a`) plus the local changes listed in `renderer-source.json` - see [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md). `python3 tools/check_sync.py` proves every other file is byte-identical. |
 | `android-plugin/` | The plugin: `AndroidManifest.xml` (RendererPlugin v2 + v1 meta-data), the v2 JSON config, and the single information `Activity`. |
 | `tools/` | `package_apk.py` (aapt2 + javac + d8 + zipalign + apksigner, no Gradle), `verify_apk.py` (post-build contract checks), `collect_native.py`, `check_sync.py`. |
 | `tests/` | Contract tests for the manifest, the v2 config and the packaging helpers - plain Python, no SDK. |
 | `src/`, `res/` | The original desktop RustGL demo (SDL2 + OpenGL) this repository started as. Kept for reference; it is not part of the Android plugin. |
 | `docs/UNIVERSAL_APK.md` | Install, per-launcher notes, environment variables, limitations, signing and rebuild instructions. |
+| `docs/PERFORMANCE.md` | What was optimized in the renderer (per-call locking, shader translation caching, compile/link stalls, per-draw allocations), how the driver capability tiers work, and what is **not** measured. |
 
 ## The universal APK
 

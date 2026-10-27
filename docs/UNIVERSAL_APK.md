@@ -109,10 +109,12 @@ data - it only removes the renderer entry. Verify any download against
 
 ## Source, licences, rebuild
 
-- Renderer source: `rustgl/` in this repository, synced unmodified from
+- Renderer source: `rustgl/` in this repository, synced from
   [`Gurkha Launcher`](https://github.com/kushaladhikari982648-lgtm/Gurkha-launcher)
-  (`rustgl/`, branch `arena/a8e9723f-gurkha-launcher`, commit `1726782a`).
-  `python3 tools/check_sync.py` proves the copy is byte-identical.
+  (`rustgl/`, branch `arena/a8e9723f-gurkha-launcher`, commit `1726782a`) plus the
+  local changes documented in `renderer-source.json` (see
+  [`docs/PERFORMANCE.md`](PERFORMANCE.md)). `python3 tools/check_sync.py`
+  proves every other file is byte-identical.
 - Upstream of that code: <https://github.com/whaltermc/rust-renderer>
   (revision `eb22559`). Upstream publishes **no licence file**; until it does,
   treat the renderer code as "used with the author's permission" and keep the
