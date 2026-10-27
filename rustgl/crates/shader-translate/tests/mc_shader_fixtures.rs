@@ -507,3 +507,210 @@ fn fog_call_uses_the_declared_float_parameter() {
     let text = shader_translate::translate(MC_MODERN_FSH_FOG_CALL).unwrap();
     assert!(text.contains("linear_fog_value(vertexDistance, float(0), FogCloudsEnd)"), "{text}");
 }
+
+/// Iris / OptiFine `gbuffers_terrain.vsh`: GLSL 330 with the attribute names a shader pack
+/// injects (`mc_Entity`, `at_tangent`) and no uniform blocks. This is the dialect most shader
+/// packs still ship, and the one that decides whether a pack works at all.
+const GBUFFERS_TERRAIN_VSH_IRIS: &str = r#"#version 330
+
+in vec3 Position;
+in vec4 Color;
+in vec2 UV0;
+in ivec2 UV2;
+in vec3 Normal;
+in vec4 at_tangent;
+in vec3 mc_Entity;
+
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+uniform vec3 cameraPosition;
+uniform float frameTimeCounter;
+
+out vec4 texcoord;
+out vec4 lmcoord;
+out vec4 color;
+out vec3 normal;
+out vec3 viewPos;
+out float entityId;
+
+void main() {
+    vec4 viewPosition = modelViewMatrix * vec4(Position, 1.0);
+    gl_Position = projectionMatrix * viewPosition;
+
+    texcoord = vec4(UV0, 0.0, 0.0);
+    lmcoord = vec4(vec2(UV2) / 255.0, 0.0, 1.0);
+    color = Color;
+    normal = normalize((modelViewMatrix * vec4(Normal, 0.0)).xyz);
+    viewPos = viewPosition.xyz;
+    entityId = mc_Entity.x;
+}
+"#;
+
+/// Iris / OptiFine `gbuffers_terrain.fsh`: alpha test, entity colour tint and a hand-written
+/// fragment output - everything here must survive verbatim or the pack renders black.
+const GBUFFERS_TERRAIN_FSH_IRIS: &str = r#"#version 330
+
+uniform sampler2D gtexture;
+uniform sampler2D lightmap;
+uniform vec4 entityColor;
+uniform float alphaTestRef;
+
+in vec4 texcoord;
+in vec4 lmcoord;
+in vec4 color;
+in vec3 normal;
+in float entityId;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 albedo = texture(gtexture, texcoord.st) * color;
+    albedo.rgb = mix(albedo.rgb, entityColor.rgb, entityColor.a);
+    if (albedo.a < alphaTestRef) {
+        discard;
+    }
+    vec3 light = texture(lightmap, lmcoord.st).rgb;
+    fragColor = vec4(albedo.rgb * light, albedo.a);
+}
+"#;
+
+/// Iris / OptiFine `composite.fsh`: a full-screen deferred pass that reads a colour
+/// attachment through `gl_FragCoord` - the pattern every post-processing stage uses.
+const COMPOSITE_FSH_IRIS: &str = r#"#version 330
+
+uniform sampler2D colortex0;
+uniform sampler2D colortex1;
+uniform float viewWidth;
+uniform float viewHeight;
+uniform float frameTimeCounter;
+
+in vec2 texCoord;
+
+out vec4 fragColor;
+
+void main() {
+    vec2 coord = gl_FragCoord.xy / vec2(viewWidth, viewHeight);
+    vec3 color = texture(colortex0, coord).rgb;
+    float depth = texture(colortex1, coord).r;
+    float pulse = 0.5 + 0.5 * sin(frameTimeCounter);
+    fragColor = vec4(color * mix(1.0, pulse, 0.25), depth);
+}
+"#;
+
+/// Sodium-style chunk vertex shader: GLSL 330, one std140 block for the section offset that
+/// the mod updates per section, and plain uniforms for the matrices.
+const SODIUM_TERRAIN_VSH: &str = r#"#version 330
+
+layout(std140) uniform ChunkOffset {
+    vec4 u_ChunkOffset;
+};
+
+uniform mat4 u_ModelViewProjectionMatrix;
+
+in vec3 aPosition;
+in vec4 aColor;
+in vec2 aTexCoord;
+in vec2 aLightCoord;
+
+out vec4 v_Color;
+out vec2 v_TexCoord;
+out vec2 v_LightCoord;
+
+void main() {
+    vec3 position = aPosition + u_ChunkOffset.xyz;
+    gl_Position = u_ModelViewProjectionMatrix * vec4(position, 1.0);
+    v_Color = aColor;
+    v_TexCoord = aTexCoord;
+    v_LightCoord = aLightCoord;
+}
+"#;
+
+/// Minecraft 1.12.2 `block.vsh`: `#version 120` with `attribute` / `varying`, the oldest
+/// dialect the game still ships in 1.7-1.12 modpacks.
+const LEGACY_VSH_1_12_2: &str = r#"#version 120
+
+attribute vec3 Position;
+attribute vec4 Color;
+attribute vec2 UV0;
+
+uniform mat4 ModelViewMat;
+uniform mat4 ProjMat;
+
+varying vec4 vertexColor;
+varying vec2 texCoord0;
+
+void main() {
+    gl_Position = ProjMat * ModelViewMat * vec4(Position, 1.0);
+    vertexColor = Color;
+    texCoord0 = UV0;
+}
+"#;
+
+/// 1.17-1.19 `rendertype_entity_cutout.fsh`: `#version 150`, a single sampler, an alpha test
+/// and an explicit fragment output - the shape of every entity render type in that era.
+const ENTITY_CUTOUT_FSH_1_17: &str = r#"#version 150
+
+uniform sampler2D Sampler0;
+uniform vec4 ColorModulator;
+
+in vec2 texCoord0;
+in vec4 vertexColor;
+in float vertexDistance;
+
+out vec4 fragColor;
+
+void main() {
+    vec4 color = texture(Sampler0, texCoord0) * vertexColor * ColorModulator;
+    if (color.a < 0.1) {
+        discard;
+    }
+    fragColor = color;
+}
+"#;
+
+#[test]
+fn shader_pack_dialects_translate_and_keep_their_names() {
+    let out = assert_ok(GBUFFERS_TERRAIN_VSH_IRIS);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    for kept in ["in vec3 mc_Entity;", "in vec4 at_tangent;", "in ivec2 UV2;",
+                 "out vec4 texcoord;", "uniform mat4 projectionMatrix;"] {
+        assert!(out.contains(kept), "{kept} lost:\n{out}");
+    }
+
+    let out = assert_ok(GBUFFERS_TERRAIN_FSH_IRIS);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    // A pack declares its own output: the gl_FragColor rewrite must not be forced on it.
+    assert!(out.contains("out vec4 fragColor;"), "{out}");
+    assert!(!out.contains("rust_FragColor"), "{out}");
+    assert!(out.contains("discard;"), "{out}");
+    assert!(out.contains("texture(gtexture, texcoord.st)"), "{out}");
+
+    let out = assert_ok(COMPOSITE_FSH_IRIS);
+    assert!(out.contains("gl_FragCoord.xy / vec2(viewWidth, viewHeight)"), "{out}");
+    assert!(out.contains("texture(colortex0, coord)"), "{out}");
+}
+
+#[test]
+fn sodium_chunk_shader_keeps_its_uniform_block() {
+    let out = assert_ok(SODIUM_TERRAIN_VSH);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    assert!(out.contains("layout(std140) uniform ChunkOffset"), "{out}");
+    assert!(out.contains("vec4 u_ChunkOffset;"), "{out}");
+    assert!(out.contains("u_ModelViewProjectionMatrix * vec4(position, 1.0)"), "{out}");
+}
+
+#[test]
+fn legacy_attribute_and_varying_are_rewritten() {
+    let out = assert_ok(LEGACY_VSH_1_12_2);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    assert!(out.contains("in vec3 Position;"), "{out}");
+    assert!(out.contains("out vec4 vertexColor;"), "{out}");
+    assert!(!out.contains("attribute "), "{out}");
+    assert!(!out.contains("varying "), "{out}");
+
+    let out = assert_ok(ENTITY_CUTOUT_FSH_1_17);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    assert!(out.contains("in vec2 texCoord0;"), "{out}");
+    assert!(out.contains("out vec4 fragColor;"), "{out}");
+    assert!(out.contains("discard;"), "{out}");
+}

@@ -218,6 +218,50 @@ unsafe fn scratch_index_buffer() -> Option<u32> {
     Some(buf)
 }
 
+/// Scratch CPU staging buffer for the re-base below, recycled across draws.
+///
+/// This is the hot path on drivers without the base-vertex entry points: chunk rendering
+/// issues one draw per section, and the previous code allocated, zeroed and freed a fresh
+/// `Vec` for every one of them. On the small cores of a GE8300-class phone a few hundred
+/// allocations per frame is allocator and page-fault time the game never gets back. The pool
+/// is thread-local (chunk building runs on worker threads) so recycling needs no locking,
+/// and it holds at most `SCRATCH_KEEP` buffers.
+const SCRATCH_KEEP: usize = 2;
+const SCRATCH_MAX_KEEP_BYTES: usize = 1024 * 1024;
+
+thread_local! {
+    static SCRATCH_BUFFERS: std::cell::RefCell<Vec<Vec<u8>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_scratch(len: usize) -> Vec<u8> {
+    SCRATCH_BUFFERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        match pool.pop() {
+            Some(mut buffer) if buffer.capacity() >= len => {
+                buffer.clear();
+                buffer.resize(len, 0);
+                buffer
+            }
+            _ => vec![0u8; len],
+        }
+    })
+}
+
+/// Hands the buffer back to the pool. One that grew past `SCRATCH_MAX_KEEP_BYTES` is dropped
+/// instead: a single huge quad pass must not pin a megabyte allocation for the whole session.
+fn recycle_scratch(buffer: Vec<u8>) {
+    if buffer.capacity() > SCRATCH_MAX_KEEP_BYTES {
+        return;
+    }
+    SCRATCH_BUFFERS.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < SCRATCH_KEEP {
+            pool.push(buffer);
+        }
+    })
+}
+
 /// Draws indexed geometry with `base_vertex` added to every index, emulating the GL 3.2
 /// base-vertex entry points on a GLES driver that lacks them. `instance_count` of `Some(n)`
 /// draws instanced (`glDrawElementsInstanced`), `None` draws once.
@@ -280,8 +324,19 @@ unsafe fn draw_elements_base_vertex_emulated(
         }
     };
 
+    let (Some(buf), Some(bind), Some(buffer_data)) = (
+        scratch_index_buffer(),
+        f::<unsafe extern "C" fn(u32, u32)>("glBindBuffer"),
+        f::<unsafe extern "C" fn(u32, isize, *const c_void, u32)>("glBufferData"),
+    ) else {
+        err(GL_INVALID_OPERATION);
+        return;
+    };
+
     // Re-base: wrap-around at the index type width matches what desktop drivers do.
-    let mut rebased = vec![0u8; byte_len];
+    // Staging memory comes from the pool above - one allocation per draw showed up as
+    // allocator time on the slow cores.
+    let mut rebased = take_scratch(byte_len);
     let base = base_vertex as i64;
     for i in 0..count_usize {
         let value = match ty {
@@ -304,14 +359,6 @@ unsafe fn draw_elements_base_vertex_emulated(
         }
     }
 
-    let (Some(buf), Some(bind), Some(buffer_data)) = (
-        scratch_index_buffer(),
-        f::<unsafe extern "C" fn(u32, u32)>("glBindBuffer"),
-        f::<unsafe extern "C" fn(u32, isize, *const c_void, u32)>("glBufferData"),
-    ) else {
-        err(GL_INVALID_OPERATION);
-        return;
-    };
     bind(GL_ELEMENT_ARRAY_BUFFER, buf);
     buffer_data(
         GL_ELEMENT_ARRAY_BUFFER,
@@ -338,6 +385,7 @@ unsafe fn draw_elements_base_vertex_emulated(
         }
     }
     bind(GL_ELEMENT_ARRAY_BUFFER, bound as u32);
+    recycle_scratch(rebased);
 }
 
 /// GL 3.2 `glDrawElementsBaseVertex`, emulated when the driver has no base-vertex drawing.

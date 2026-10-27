@@ -28,7 +28,7 @@ mod overlay;
 use renderer_core::{Backend, BackendKind, Config, GlErrorState};
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::collections::HashMap;
 
 
@@ -718,7 +718,7 @@ pub(crate) fn probe_shader_target_is_es_for_test(version: &str) -> bool {
 /// second entry for one name would defeat the point of the cache.
 /// (The map is wrapped in an Option because `HashMap::new` is not a const fn and this is a static.)
 type DriverCache = std::collections::HashMap<&'static [u8], usize>;
-static DRIVER_CACHE: Mutex<Option<DriverCache>> = Mutex::new(None);
+static DRIVER_CACHE: RwLock<Option<DriverCache>> = RwLock::new(None);
 
 /// Drops every memoized driver entry point. Called when the GL context changes.
 fn clear_driver_cache() {
@@ -733,16 +733,22 @@ pub(crate) fn driver_fn_cached<T: Copy>(name: &'static str) -> Option<T> {
     trace_call(name);
     let key = name.as_bytes();
     {
-        let mut guard = DRIVER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        let cache = guard.get_or_insert_with(DriverCache::new);
-        if let Some(addr) = cache.get(key) {
-            if *addr == 0 {
-                return None;
+        // A *shared* read lock: this runs on every forwarded GL call, and Minecraft's
+        // chunk-build threads (Sodium, and the vanilla chunk uploader) issue GL calls
+        // concurrently with the render thread. With a Mutex every one of those calls
+        // serialised on one lock; RwLock lets the (overwhelmingly common) hit path run
+        // in parallel and only the first resolution of a name takes the write lock.
+        let guard = DRIVER_CACHE.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(cache) = guard.as_ref() {
+            if let Some(addr) = cache.get(key) {
+                if *addr == 0 {
+                    return None;
+                }
+                // SAFETY: the cached value came from `driver_fn`, which stores only pointers
+                // obtained from dlsym / eglGetProcAddress for this exact symbol name.
+                let addr = *addr;
+                return Some(unsafe { std::mem::transmute_copy::<usize, T>(&addr) });
             }
-            // SAFETY: the cached value came from `driver_fn`, which stores only pointers
-            // obtained from dlsym / eglGetProcAddress for this exact symbol name.
-            let addr = *addr;
-            return Some(unsafe { std::mem::transmute_copy::<usize, T>(&addr) });
         }
     }
     // Resolve outside the lock: dlsym must not run while the cache is borrowed.
@@ -758,9 +764,11 @@ pub(crate) fn driver_fn_cached<T: Copy>(name: &'static str) -> Option<T> {
     // SAFETY: `driver_fn` already checked that T has pointer size, so this copies the
     // function pointer's bits verbatim into a pointer-sized integer.
     let ptr: usize = unsafe { std::mem::transmute_copy::<T, usize>(&f) };
-    let mut guard = DRIVER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let cache = guard.get_or_insert_with(DriverCache::new);
-    cache.entry(key).or_insert(ptr);
+    {
+        let mut guard = DRIVER_CACHE.write().unwrap_or_else(|e| e.into_inner());
+        let cache = guard.get_or_insert_with(DriverCache::new);
+        cache.entry(key).or_insert(ptr);
+    }
     Some(f)
 }
 
@@ -1103,6 +1111,75 @@ pub unsafe extern "C" fn glDepthRange(near: f64, far: f64) {
     }
 }
 
+/// Memoized desktop-GLSL -> GLSL-ES translation.
+///
+/// The game hands the same source to `glShaderSource` over and over: every render type is a
+/// program variant (terrain cutout, entity, armor, glint, ...), and a resource reload, F3+T,
+/// a shader-pack option change, a dimension switch or a world rejoin recompiles all of them
+/// from identical strings. Translation parses and rewrites the whole shader, so each repeat
+/// costs milliseconds of CPU on a phone core - and shader packs (Iris/OptiFine) feed it
+/// sources of tens of kilobytes per pass.
+///
+/// The key is the source's fingerprint (hash + length) plus the two inputs that change the
+/// result: the ES target flag and the driver's texture-buffer support. Both are fixed for the
+/// life of a driver, but they are part of the key so a translation can never be served to a
+/// different target than the one it was produced for.
+///
+/// Bounded, because the lowest-end target here has 2 GB of RAM for the whole system: at most
+/// `SHADER_TRANSLATION_ENTRIES` entries and `SHADER_TRANSLATION_BYTES` of text, oldest first,
+/// and sources over `SHADER_TRANSLATION_MAX_SOURCE` are not cached at all.
+const SHADER_TRANSLATION_ENTRIES: usize = 128;
+const SHADER_TRANSLATION_BYTES: usize = 2 * 1024 * 1024;
+const SHADER_TRANSLATION_MAX_SOURCE: usize = 512 * 1024;
+
+/// (fingerprint, source length, target) - `target` packs the ES flag in bit 7 and the
+/// texture-buffer support in bits 0-3.
+type ShaderTranslationKey = (u64, usize, u8);
+static SHADER_TRANSLATIONS: RwLock<Option<Vec<(ShaderTranslationKey, String)>>> = RwLock::new(None);
+
+fn shader_translation_target(is_es: bool, texture_buffers: u8) -> u8 {
+    (if is_es { 0x80 } else { 0x00 }) | (texture_buffers & 0x7f)
+}
+
+fn shader_translation_key(src: &str, target: u8) -> ShaderTranslationKey {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = DefaultHasher::new();
+    hasher.write(src.as_bytes());
+    hasher.write_u8(target);
+    (hasher.finish(), src.len(), target)
+}
+
+fn cached_shader_translation(key: &ShaderTranslationKey) -> Option<String> {
+    let guard = SHADER_TRANSLATIONS.read().unwrap_or_else(|e| e.into_inner());
+    let entries = guard.as_ref()?;
+    entries
+        .iter()
+        .find(|(candidate, _)| candidate == key)
+        .map(|(_, translated)| translated.clone())
+}
+
+fn remember_shader_translation(key: ShaderTranslationKey, translated: &str) {
+    if translated.len() > SHADER_TRANSLATION_MAX_SOURCE {
+        return;
+    }
+    let mut guard = SHADER_TRANSLATIONS.write().unwrap_or_else(|e| e.into_inner());
+    let entries = guard.get_or_insert_with(Vec::new);
+    if entries.iter().any(|(candidate, _)| *candidate == key) {
+        return;
+    }
+    let mut bytes: usize = entries.iter().map(|(_, text)| text.len()).sum();
+    while entries.len() >= SHADER_TRANSLATION_ENTRIES
+        || bytes + translated.len() > SHADER_TRANSLATION_BYTES
+    {
+        if entries.is_empty() {
+            return;
+        }
+        bytes = bytes.saturating_sub(entries.remove(0).1.len());
+    }
+    entries.push((key, translated.to_string()));
+}
+
 /// Joins the source strings, rewrites desktop GLSL to GLSL ES, and hands one string to the driver.
 #[no_mangle]
 pub unsafe extern "C" fn glShaderSource(
@@ -1130,18 +1207,29 @@ pub unsafe extern "C" fn glShaderSource(
         src.push_str(&String::from_utf8_lossy(bytes));
     }
     let is_es = shader_translation_is_es();
-    let translated = if is_es {
-        shader_translate::translate_with_texture_buffers(&src, gles3::texture_buffer_support(&gles3::caps()))
-    } else {
-        shader_translate::translate_desktop_450(&src)
-    };
-    let translated = match translated {
-        Ok(t) => t,
-        Err(e) => {
-            // Preserve a real compile failure. A valid white fragment shader or a vertex
-            // shader at (0,0,0,0) hides unsupported features as a successful blank frame.
-            log(&format!("[ShaderTranslate] shader {shader} rejected: {e}"));
-            "#error RustGL shader translation failed; see renderer log\n".into()
+    let support = gles3::texture_buffer_support(&gles3::caps());
+    let target = shader_translation_target(is_es, support as u8);
+    let key = shader_translation_key(&src, target);
+    let translated = match cached_shader_translation(&key) {
+        Some(translated) => translated,
+        None => {
+            let translated = if is_es {
+                shader_translate::translate_with_texture_buffers(&src, support)
+            } else {
+                shader_translate::translate_desktop_450(&src)
+            };
+            let translated = match translated {
+                Ok(t) => t,
+                Err(e) => {
+                    // Preserve a real compile failure. A valid white fragment shader or a
+                    // vertex shader at (0,0,0,0) hides unsupported features as a successful
+                    // blank frame.
+                    log(&format!("[ShaderTranslate] shader {shader} rejected: {e}"));
+                    "#error RustGL shader translation failed; see renderer log\n".into()
+                }
+            };
+            remember_shader_translation(key, &translated);
+            translated
         }
     };
     // TEMP(debug): capture every shader source so translation gaps can be reproduced offline.
@@ -1154,7 +1242,7 @@ pub unsafe extern "C" fn glShaderSource(
             let _ = f.write_all(translated.as_bytes());
         }
     }
-    let c = match CString::new(translated.clone()) {
+    let c = match CString::new(translated.as_str()) {
         Ok(c) => c,
         Err(_) => {
             errors().set(GL_INVALID_VALUE);
@@ -1172,6 +1260,10 @@ pub unsafe extern "C" fn glShaderSource(
 }
 
 
+const GL_COMPILE_STATUS: u32 = 0x8B81;
+const GL_LINK_STATUS: u32 = 0x8B82;
+const GL_INFO_LOG_LENGTH: u32 = 0x8B84;
+
 /// Reports translated shader failures with the backend compiler log. Vanilla world shaders
 /// can fail compilation while all later draw calls still appear valid in an apitrace.
 #[no_mangle]
@@ -1182,23 +1274,43 @@ pub unsafe extern "C" fn glCompileShader(shader: u32) {
         return;
     };
     compile(shader);
-
+    // Drivers that advertise GL_KHR_parallel_shader_compile compile in the background, and
+    // reading GL_COMPILE_STATUS is the operation that waits for them to finish. Minecraft and
+    // every shader pack compile their programs in a loop, so this one query is the difference
+    // between compiles overlapping and one stall per shader. Nothing is lost: the status is
+    // still reported, with the driver's info log, from `glGetShaderiv`, which the game calls
+    // before it uses the shader anyway.
+    if parallel_shader_compile() {
+        return;
+    }
     let Some(get_shader_iv) = driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetShaderiv") else {
         return;
     };
-    const GL_COMPILE_STATUS: u32 = 0x8B81;
-    const GL_INFO_LOG_LENGTH: u32 = 0x8B84;
     let mut status = 0;
     get_shader_iv(shader, GL_COMPILE_STATUS, &mut status);
-    if status != 0 {
+    if status != 0 || !log_failure_once(&COMPILE_FAILURES_LOGGED, shader) {
         take_shader_source(shader);
         return;
     }
-    if !log_failure_once(&COMPILE_FAILURES_LOGGED, shader) {
-        take_shader_source(shader);
-        return;
-    }
+    report_compile_failure(shader);
+}
 
+/// Whether the driver can compile and link shaders in the background
+/// (`GL_KHR_parallel_shader_compile`). Adreno and Mali expose it, PowerVR generally does not.
+/// The answer is cached with the rest of the capability probe.
+fn parallel_shader_compile() -> bool {
+    gles3::caps().has(b"GL_KHR_parallel_shader_compile")
+}
+
+/// Reports a failed compile with the driver's info log and the translated source.
+///
+/// Called from `glCompileShader` on drivers that compile synchronously, and from
+/// `glGetShaderiv` on drivers that do not - the status read is the first point at which a
+/// background compile's result is known.
+unsafe fn report_compile_failure(shader: u32) {
+    let Some(get_shader_iv) = driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetShaderiv") else {
+        return;
+    };
     let mut length = 0;
     get_shader_iv(shader, GL_INFO_LOG_LENGTH, &mut length);
     if length <= 1 {
@@ -1246,6 +1358,33 @@ pub unsafe extern "C" fn glCompileShader(shader: u32) {
     }
 }
 
+/// Forwards `glGetShaderiv` and reports compile failures.
+///
+/// Hand-written instead of being generated by `forward_all!` so the status read - the
+/// synchronisation point for a background compile, see `glCompileShader` - is also where a
+/// failure is logged. Every other pname is passed straight through.
+#[no_mangle]
+pub unsafe extern "C" fn glGetShaderiv(shader: u32, pname: u32, params: *mut i32) {
+    trace_call("glGetShaderiv");
+    let Some(get_shader_iv) = driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetShaderiv") else {
+        errors().set(GL_INVALID_OPERATION);
+        return;
+    };
+    get_shader_iv(shader, pname, params);
+    if pname != GL_COMPILE_STATUS || params.is_null() {
+        return;
+    }
+    if *params != 0 {
+        take_shader_source(shader);
+        return;
+    }
+    if !log_failure_once(&COMPILE_FAILURES_LOGGED, shader) {
+        take_shader_source(shader);
+        return;
+    }
+    report_compile_failure(shader);
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn glLinkProgram(program: u32) {
     trace_call("glLinkProgram");
@@ -1254,8 +1393,12 @@ pub unsafe extern "C" fn glLinkProgram(program: u32) {
         return;
     };
     link(program);
-    const GL_LINK_STATUS: u32 = 0x8B82;
-    const GL_INFO_LOG_LENGTH: u32 = 0x8B84;
+    // Same reasoning as `glCompileShader`: asking for GL_LINK_STATUS blocks until the driver
+    // has finished, so on drivers that link in the background the wait belongs to the caller
+    // that needs the answer (`glGetProgramiv`), not to the submit.
+    if parallel_shader_compile() {
+        return;
+    }
     let Some(get_program_iv) =
         driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetProgramiv")
     else {
@@ -1266,7 +1409,16 @@ pub unsafe extern "C" fn glLinkProgram(program: u32) {
     if status != 0 || !log_failure_once(&LINK_FAILURES_LOGGED, program) {
         return;
     }
+    report_link_failure(program);
+}
 
+/// Reports a failed link with the driver's info log. See [`report_compile_failure`].
+unsafe fn report_link_failure(program: u32) {
+    let Some(get_program_iv) =
+        driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetProgramiv")
+    else {
+        return;
+    };
     let mut length = 0;
     get_program_iv(program, GL_INFO_LOG_LENGTH, &mut length);
     if length <= 1 {
@@ -1287,6 +1439,25 @@ pub unsafe extern "C" fn glLinkProgram(program: u32) {
     let written = written.max(0) as usize;
     let message = String::from_utf8_lossy(&bytes[..written.min(bytes.len())]);
     log(&format!("[GLCompat] link failed program={program}: {message}"));
+}
+
+/// Forwards `glGetProgramiv` and reports link failures. See [`glGetShaderiv`]: on drivers
+/// that link in the background this is where the result becomes visible.
+#[no_mangle]
+pub unsafe extern "C" fn glGetProgramiv(program: u32, pname: u32, params: *mut i32) {
+    trace_call("glGetProgramiv");
+    let Some(get_program_iv) = driver_fn_cached::<unsafe extern "C" fn(u32, u32, *mut i32)>("glGetProgramiv") else {
+        errors().set(GL_INVALID_OPERATION);
+        return;
+    };
+    get_program_iv(program, pname, params);
+    if pname != GL_LINK_STATUS || params.is_null() || *params != 0 {
+        return;
+    }
+    if !log_failure_once(&LINK_FAILURES_LOGGED, program) {
+        return;
+    }
+    report_link_failure(program);
 }
 
 #[no_mangle]
@@ -1964,9 +2135,7 @@ forward_all! {
     glGenerateMipmap(t: u32);
     glGetAttribLocation(p: u32, n: *const c_char) -> i32;
     glGetProgramInfoLog(p: u32, b: i32, l: *mut i32, log: *mut c_char);
-    glGetProgramiv(p: u32, n: u32, v: *mut i32);
     glGetShaderInfoLog(s: u32, b: i32, l: *mut i32, log: *mut c_char);
-    glGetShaderiv(s: u32, n: u32, v: *mut i32);
     glGetUniformLocation(p: u32, n: *const c_char) -> i32;
     glIsEnabled(c: u32) -> u8;
     glPolygonOffset(f: f32, u: f32);

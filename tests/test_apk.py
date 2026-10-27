@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 import package_apk  # noqa: E402
 import verify_apk  # noqa: E402
+import check_sync  # noqa: E402
 from check_sync import tree_hash  # noqa: E402
 
 ANDROID = "{http://schemas.android.com/apk/res/android}"
@@ -242,10 +243,33 @@ class PackagingTests(unittest.TestCase):
 
 
 class SourceSyncTests(unittest.TestCase):
-    def test_renderer_source_is_unmodified(self):
+    def test_renderer_source_matches_the_recorded_source(self):
+        """rustgl/ is the recorded Gurkha Launcher source plus its documented local changes.
+
+        check_sync.verify() substitutes the recorded upstream blobs back into the tree and
+        compares the result with the recorded tree hash, so an undocumented edit - or a
+        documented entry that no longer describes a change - fails here.
+        """
         record = json.loads(RECORD.read_text(encoding="utf-8"))
-        self.assertEqual(tree_hash(ROOT / "rustgl"), record["treeHash"],
-                         "rustgl/ no longer matches the recorded Gurkha Launcher source")
+        ok, report = check_sync.verify(record)
+        self.assertTrue(ok, "\n".join(report))
+
+    def test_documented_local_changes_are_complete(self):
+        record = json.loads(RECORD.read_text(encoding="utf-8"))
+        for entry in record.get("localChanges", []):
+            self.assertIn("path", entry)
+            self.assertIn("summary", entry, f"{entry['path']} needs a reason")
+            self.assertIn("upstreamBlob", entry)
+            self.assertRegex(entry["upstreamBlob"], r"^[0-9a-f]{40}$",
+                             f"{entry['path']} needs the upstream blob id")
+            self.assertTrue((ROOT / "rustgl" / entry["path"]).is_file(),
+                            f"{entry['path']} is not a file in rustgl/")
+            self.assertFalse(entry["path"].startswith("/"), "paths are relative to rustgl/")
+            self.assertNotIn("..", Path(entry["path"]).parts, "no escapes above rustgl/")
+
+    def test_tree_hash_helper_still_hashes_the_directory(self):
+        """The helper the sync check is built on: a stable hash of rustgl/."""
+        self.assertRegex(tree_hash(ROOT / "rustgl"), r"^[0-9a-f]{40}$")
 
     def test_renderer_workspace_builds_the_expected_library(self):
         cargo = (ROOT / "rustgl" / "crates" / "gl-compat" / "Cargo.toml").read_text()
