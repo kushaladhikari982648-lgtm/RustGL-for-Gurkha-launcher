@@ -723,7 +723,7 @@ static DRIVER_CACHE: RwLock<Option<DriverCache>> = RwLock::new(None);
 /// Drops every memoized driver entry point. Called when the GL context changes.
 fn clear_driver_cache() {
     DRIVER_CACHE
-        .lock()
+        .write()
         .unwrap_or_else(|e| e.into_inner())
         .take();
 }
@@ -3534,9 +3534,9 @@ mod tests {
         // keyed by the name, so repeated lookups must not re-resolve. The checks are scoped
         // to this entry: other tests fill the same cache and run in parallel.
         fn cached(name: &[u8]) -> Option<usize> {
-            // Scoped so the guard is released: std::sync::Mutex is not reentrant.
+            // Scoped so the guard is released before the next lookup takes its own.
             DRIVER_CACHE
-                .lock()
+                .read()
                 .unwrap()
                 .as_ref()
                 .and_then(|cache| cache.get(name).copied())
@@ -3573,7 +3573,7 @@ mod tests {
         driver_fn_cached::<unsafe extern "C" fn(u32)>("glCullFace");
         clear_driver_cache();
         let still_cached = DRIVER_CACHE
-            .lock()
+            .read()
             .unwrap()
             .as_ref()
             .and_then(|cache| cache.get(&b"glCullFace"[..]).copied());
