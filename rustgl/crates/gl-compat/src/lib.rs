@@ -3495,6 +3495,23 @@ mod tests {
         ("GL_EXT_color_buffer_float", &["glTexImage2D", "glRenderbufferStorage"]),
         ("GL_EXT_color_buffer_half_float", &["glTexImage2D", "glRenderbufferStorage"]),
         ("GL_EXT_texture_format_BGRA8888", &["glTexImage2D", "glTexSubImage2D", "glRenderbufferStorage"]),
+        ("GL_ARB_multitexture", &["glActiveTexture"]),
+        ("GL_EXT_texture_array", &["glTexImage3D", "glFramebufferTextureLayer"]),
+    ];
+
+    /// Advertised extensions that add **no entry point at all**: they are part of the
+    /// shading language or of the texture format list, so the only thing a client can
+    /// do with them is compile a shader that uses them. OptiFine turns every advertised
+    /// name into the `MC_GL_<ext>` macro its shaders test with `#ifdef`, so these have
+    /// to be advertised for a pack to take its real code path - and there is nothing to
+    /// resolve, which is exactly why the table above cannot hold them.
+    const GLSL_OR_FORMAT_ONLY_EXTENSIONS: &[(&str, &str)] = &[
+        ("GL_ARB_shader_texture_lod", "GLSL only: texture2DLod / texture2DGradARB"),
+        ("GL_EXT_shader_texture_lod", "GLSL only: the ES spelling of the same extension"),
+        ("GL_ARB_depth_texture", "formats only: depth textures are created with glTexImage2D"),
+        ("GL_ARB_shadow", "GLSL and TexParameter only: sampler2DShadow and TEXTURE_COMPARE_MODE"),
+        ("GL_ARB_texture_float", "formats only: float internal formats for glTexImage2D"),
+        ("GL_ARB_color_buffer_half_float", "formats only: renderable half-float formats"),
     ];
 
     #[test]
@@ -3538,10 +3555,29 @@ mod tests {
             let listed = ADVERTISED_ENTRY_POINTS
                 .iter()
                 .any(|(e, _)| e.as_bytes() == name);
+            let has_no_entry_points = GLSL_OR_FORMAT_ONLY_EXTENSIONS
+                .iter()
+                .any(|(e, _)| e.as_bytes() == name);
             assert!(
-                listed,
+                listed || has_no_entry_points,
                 "{} is advertised without a tested entry point in ADVERTISED_ENTRY_POINTS",
                 String::from_utf8_lossy(name)
+            );
+        }
+    }
+
+    /// An extension belongs to one table or the other, never both: listing entry points
+    /// for a shading-language extension would mean inventing a call the client would
+    /// then bind, and listing one that has real functions as "nothing to resolve" would
+    /// let a null pointer through the check above.
+    #[test]
+    fn the_two_extension_tables_do_not_overlap() {
+        for (ext, _) in GLSL_OR_FORMAT_ONLY_EXTENSIONS {
+            assert!(
+                !ADVERTISED_ENTRY_POINTS
+                    .iter()
+                    .any(|(e, _)| e == ext),
+                "{ext} is listed as having no entry points but is also in ADVERTISED_ENTRY_POINTS"
             );
         }
     }

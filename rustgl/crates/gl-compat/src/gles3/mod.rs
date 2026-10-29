@@ -328,7 +328,6 @@ pub fn supported_aliases(c: &GlesCapabilities) -> Vec<&'static [u8]> {
     }
     // Only claim what the driver actually reports and can actually do.
     #[cfg(test)]
-    println!("INFN has={} max={} nexts={}", c.has(ext!("GL_EXT_texture_filter_anisotropic")), c.max_anisotropy, c.extensions.len());
     if c.has(ext!("GL_EXT_texture_filter_anisotropic")) && c.max_anisotropy > 1 {
         out.push(ext!("GL_EXT_texture_filter_anisotropic"));
     }
