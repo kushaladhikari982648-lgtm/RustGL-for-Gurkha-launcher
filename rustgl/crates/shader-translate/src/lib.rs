@@ -138,13 +138,17 @@ fn rewrite_legacy_builtins(src: &str, is_frag: bool) -> String {
 /// template opens with `uniform sampler2D texture;`, and once its `texture2D()` calls become
 /// `texture()` calls that sampler hides the function: the driver reports "no function with
 /// name 'texture'" and the pack never compiles.
+/// Only the names the desktop-to-ES rewrite below *introduces* belong here: a pack that
+/// declares one of them worked on the desktop and breaks the moment its own calls are
+/// renamed onto it. `texelFetch` and `textureSize` are spelled the same in both dialects, so
+/// a variable of that name was already broken before this layer saw the shader.
 const ES3_FUNCTION_NAMES: &[&str] = &[
     "texture",
     "textureLod",
     "textureProj",
     "textureGrad",
-    "textureSize",
-    "texelFetch",
+    "textureProjLod",
+    "textureProjGrad",
 ];
 
 fn is_glsl_type(word: &str) -> bool {
@@ -182,19 +186,28 @@ fn is_glsl_type(word: &str) -> bool {
     ) || word.contains("sampler")
 }
 
-/// Whether `src` **declares** a variable called `name`, as opposed to calling it. A call is
-/// preceded by `=` or a comma, a declaration by a type: that is the only difference that
-/// matters here, because one has to be renamed and the other must not be.
+/// Whether `src` **declares** a variable called `name`, as opposed to calling it.
+///
+/// Two things have to hold: a type word sits immediately before it, and it is not followed by
+/// `(`. The second test is what keeps `vec4(texelFetch(buf, 0))` - a type word directly in
+/// front of a call - from being read as a declaration.
 fn declares_variable(src: &str, name: &str) -> bool {
-    let mut previous = String::new();
-    for word in src
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .filter(|w| !w.is_empty())
-    {
-        if word == name && is_glsl_type(&previous) {
+    for (start, _) in src.match_indices(name) {
+        let before = src[..start]
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|w| !w.is_empty())
+            .last()
+            .unwrap_or("");
+        if !is_glsl_type(before) {
+            continue;
+        }
+        let next = src[start + name.len()..]
+            .bytes()
+            .find(|b| !b.is_ascii_whitespace())
+            .map(char::from);
+        if matches!(next, Some(';' | ',' | '[' | '=' | ')')) {
             return true;
         }
-        previous = word.to_string();
     }
     false
 }
@@ -1803,6 +1816,22 @@ mod tests {
         .unwrap();
         assert!(i.contains("texture(gtexture, uv)"), "{i}");
         assert!(!i.contains("rust_texture"), "{i}");
+    }
+
+    #[test]
+    fn a_call_in_front_of_a_type_word_is_not_a_declaration() {
+        // vec4(texture(...)) has a type word immediately before the call, which is also what
+        // a declaration looks like. Only the following `(` says which it is.
+        let o = translate(
+            "#version 330\n\
+             uniform sampler2D gtexture;\n\
+             in vec2 uv;\n\
+             out vec4 c;\n\
+             void main(){ c = vec4(texture(gtexture, uv)); }\n",
+        )
+        .unwrap();
+        assert!(o.contains("texture(gtexture, uv)"), "{o}");
+        assert!(!o.contains("rust_texture"), "{o}");
     }
 
     #[test]
