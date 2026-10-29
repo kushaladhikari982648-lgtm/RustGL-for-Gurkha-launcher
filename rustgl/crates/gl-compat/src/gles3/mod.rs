@@ -338,6 +338,26 @@ pub fn supported_aliases(c: &GlesCapabilities) -> Vec<&'static [u8]> {
     if c.supports_half_float_color_targets() {
         out.push(ext!("GL_EXT_color_buffer_half_float"));
     }
+    // ---- Shader packs (OptiFine / Iris) ----
+    // GLSL-only or format-only names, so none of them needs an entry point of its own: ES 3.0
+    // has `textureLod` / `textureGrad` in core (shader-translate maps texture2DLod and the
+    // other ARB/EXT LOD names onto them), depth textures with sampler comparison, array
+    // textures, and float textures. OptiFine both gates its shader path on these names and
+    // turns each of them into an `MC_GL_*` preprocessor macro the packs test with #ifdef.
+    out.push(ext!("GL_ARB_shader_texture_lod"));
+    out.push(ext!("GL_EXT_shader_texture_lod"));
+    out.push(ext!("GL_ARB_depth_texture"));
+    out.push(ext!("GL_ARB_shadow"));
+    out.push(ext!("GL_ARB_multitexture"));
+    out.push(ext!("GL_ARB_texture_float"));
+    out.push(ext!("GL_ARB_framebuffer_object"));
+    out.push(ext!("GL_EXT_texture_array"));
+    if c.supports_float_color_targets() {
+        out.push(ext!("GL_ARB_color_buffer_float"));
+    }
+    if c.supports_half_float_color_targets() {
+        out.push(ext!("GL_ARB_color_buffer_half_float"));
+    }
     if c.has_debug_output {
         out.push(ext!("GL_KHR_debug"));
     }

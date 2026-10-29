@@ -793,6 +793,11 @@ pub fn arrays() -> (ArraySnapshot, ArraySnapshot, ArraySnapshot) {
     with_ff(|s| (snap(&s.vertex), snap(&s.color), snap(&s.texcoord)))
 }
 
+/// The tracked normal array (`glNormalPointer`), for shaders that read `gl_Normal`.
+pub fn normal_array() -> ArraySnapshot {
+    with_ff(|s| snap(&s.normal))
+}
+
 pub fn alpha() -> (u32, f32) {
     with_ff(|s| s.alpha_func)
 }

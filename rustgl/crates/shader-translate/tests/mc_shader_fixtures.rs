@@ -714,3 +714,231 @@ fn legacy_attribute_and_varying_are_rewritten() {
     assert!(out.contains("out vec4 fragColor;"), "{out}");
     assert!(out.contains("discard;"), "{out}");
 }
+
+/// OptiFine 1.12.2 `gbuffers_terrain.vsh`: the template every pack of that era starts from -
+/// `ftransform()`, `gl_TextureMatrix[0..1]`, `gl_MultiTexCoord0..1` and the pack's own
+/// attributes, all under `#version 120`.
+const OPTIFINE_GBUFFERS_TERRAIN_VSH_120: &str = r#"#version 120
+
+attribute vec4 mc_Entity;
+attribute vec4 at_tangent;
+
+uniform vec3 shadowLightPosition;
+uniform float frameTimeCounter;
+
+varying vec4 texcoord;
+varying vec4 lmcoord;
+varying vec4 color;
+varying vec3 normal;
+
+void main() {
+    gl_Position = ftransform();
+    texcoord = gl_TextureMatrix[0] * gl_MultiTexCoord0;
+    lmcoord = gl_TextureMatrix[1] * gl_MultiTexCoord1;
+    color = gl_Color;
+    normal = normalize(gl_NormalMatrix * gl_Normal);
+}
+"#;
+
+/// OptiFine 1.12.2 `gbuffers_terrain.fsh`: MRT through `gl_FragData[0..2]`, the LOD lookup
+/// OptiFine only writes when `GL_ARB_shader_texture_lod` is advertised, and a shadow lookup.
+const OPTIFINE_GBUFFERS_TERRAIN_FSH_120: &str = r#"#version 120
+
+uniform sampler2D texture;
+uniform sampler2D lightmap;
+uniform sampler2DShadow shadow;
+
+varying vec4 texcoord;
+varying vec4 lmcoord;
+varying vec4 color;
+varying vec3 normal;
+
+void main() {
+    vec4 albedo = texture2D(texture, texcoord.st) * color;
+    if (albedo.a < 0.1) {
+        discard;
+    }
+    gl_FragData[0] = albedo;
+    gl_FragData[1] = vec4(lmcoord.st, 0.0, 1.0);
+    gl_FragData[2] = vec4(normal * 0.5 + 0.5, 1.0);
+
+#ifdef MC_GL_ARB_shader_texture_lod
+    vec3 blurred = texture2DLod(texture, texcoord.st, 2.0).rgb;
+    gl_FragData[0].rgb = mix(gl_FragData[0].rgb, blurred.rgb, 0.25);
+#endif
+}
+"#;
+
+/// OptiFine 1.12.2 `composite.fsh`: a full-screen pass reading a colour attachment with an
+/// explicit LOD and a `const` array of weights - the shape of every blur/bloom stage.
+const OPTIFINE_COMPOSITE_FSH_120: &str = r#"#version 120
+
+uniform sampler2D colortex0;
+uniform sampler2D colortex4;
+
+varying vec4 texcoord;
+
+const float weight[3] = float[3](0.2270270270, 0.3162162162, 0.0702702703);
+
+void main() {
+    vec2 uv = texcoord.st;
+    vec3 color = texture2D(colortex0, uv).rgb * weight[0];
+    color += texture2DLod(colortex0, uv, 1.0).rgb * weight[1];
+    color += texture2D(colortex4, uv).rgb * weight[2];
+    gl_FragColor = vec4(color, 1.0);
+}
+"#;
+
+/// Iris `shadow.vsh` (GLSL 330): the shadow pass of a modern pack - its own uniforms, an
+/// integer attribute for the light-map coordinate, and no fixed-function builtins at all.
+const IRIS_SHADOW_VSH_330: &str = r#"#version 330
+
+in vec3 Position;
+in vec4 Color;
+in vec2 UV0;
+in ivec2 UV2;
+in vec3 Normal;
+
+uniform mat4 modelViewMatrix;
+uniform mat4 projectionMatrix;
+uniform mat4 shadowModelViewMatrix;
+uniform mat4 shadowProjectionMatrix;
+uniform vec3 chunkOffset;
+
+out vec4 texcoord;
+out vec4 lmcoord;
+out vec4 color;
+
+void main() {
+    vec3 pos = Position + chunkOffset;
+    gl_Position = shadowProjectionMatrix * shadowModelViewMatrix * vec4(pos, 1.0);
+    texcoord = vec4(UV0, 0.0, 1.0);
+    lmcoord = vec4(vec2(UV2) / 255.0, 0.0, 1.0);
+    color = Color;
+}
+"#;
+
+/// Iris `deferred.fsh` (GLSL 330): depth reconstruction from a depth attachment, a shadow
+/// lookup and an explicit fragment output - the deferred pass of every modern pack.
+const IRIS_DEFERRED_FSH_330: &str = r#"#version 330
+
+uniform sampler2D colortex0;
+uniform sampler2D depthtex0;
+uniform sampler2DShadow shadowtex0;
+
+uniform mat4 gbufferProjectionInverse;
+uniform mat4 shadowModelView;
+uniform mat4 shadowProjection;
+uniform vec3 shadowLightPosition;
+uniform float near;
+uniform float far;
+
+in vec2 texCoord;
+
+layout(location = 0) out vec4 fragColor;
+
+float linearize_depth(float depth) {
+    return (2.0 * near) / (far + near - depth * (far - near));
+}
+
+void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    float depth = texelFetch(depthtex0, px, 0).r;
+    vec3 albedo = texture(colortex0, texCoord).rgb;
+    float shadow = texture(shadowtex0, vec3(texCoord, depth));
+    vec3 light = normalize(shadowLightPosition);
+    float diffuse = max(dot(vec3(0.0, 1.0, 0.0), light), 0.0);
+    fragColor = vec4(albedo * (0.2 + 0.8 * diffuse * shadow), linearize_depth(depth));
+}
+"#;
+
+/// Iris `gbuffers_textured_lit.fsh` (GLSL 330): the gbuffer pass of a modern pack - texture
+/// LOD, an alpha test and two fragment outputs (MRT for the pack's own attachments).
+const IRIS_GBUFFERS_FSH_330: &str = r#"#version 330
+
+uniform sampler2D gtexture;
+uniform sampler2D lightmap;
+uniform vec4 entityColor;
+uniform float alphaTestRef;
+
+in vec2 texCoord;
+in vec2 lmCoord;
+in vec4 vertexColor;
+
+layout(location = 0) out vec4 fragColor;
+layout(location = 1) out vec4 fragData1;
+
+void main() {
+    vec4 albedo = textureLod(gtexture, texCoord, 0.0) * vertexColor;
+    albedo.rgb = mix(albedo.rgb, entityColor.rgb, entityColor.a);
+    if (albedo.a < alphaTestRef) {
+        discard;
+    }
+    vec3 light = texture(lightmap, lmCoord).rgb;
+    fragColor = vec4(albedo.rgb * light, albedo.a);
+    fragData1 = vec4(normalize(light), 1.0);
+}
+"#;
+
+#[test]
+fn optifine_120_pack_translates_onto_fed_builtins() {
+    let out = assert_ok(OPTIFINE_GBUFFERS_TERRAIN_VSH_120);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    // ftransform() and the fixed-function arrays become attributes and uniforms gl-compat
+    // feeds from the client arrays and matrix stacks.
+    for kept in [
+        "layout(location = 0) in vec4 rust_gl_Vertex;",
+        "layout(location = 8) in vec4 rust_gl_MultiTexCoord0;",
+        "layout(location = 9) in vec4 rust_gl_MultiTexCoord1;",
+        "layout(location = 2) in vec3 rust_gl_Normal;",
+        "layout(location = 3) in vec4 rust_gl_Color;",
+        "uniform mat4 rust_gl_ModelViewProjectionMatrix;",
+        "uniform mat3 rust_gl_NormalMatrix;",
+        "uniform mat4 rust_gl_TextureMatrix0;",
+        "uniform mat4 rust_gl_TextureMatrix1;",
+    ] {
+        assert!(out.contains(kept), "{kept} missing:\n{out}");
+    }
+    assert!(out.contains("gl_Position = (rust_gl_ModelViewProjectionMatrix * rust_gl_Vertex)"), "{out}");
+    assert!(!out.contains("gl_MultiTexCoord"), "{out}");
+    assert!(!out.contains("gl_TextureMatrix"), "{out}");
+    // The pack's own attributes are untouched.
+    assert!(out.contains("in vec4 mc_Entity;"), "{out}");
+    assert!(out.contains("in vec4 at_tangent;"), "{out}");
+
+    let out = assert_ok(OPTIFINE_GBUFFERS_TERRAIN_FSH_120);
+    // MRT: one output per written layer, and no gl_FragData left behind.
+    assert!(out.contains("layout(location = 0) out vec4 rust_FragColor;"), "{out}");
+    assert!(out.contains("layout(location = 1) out vec4 rust_FragData1;"), "{out}");
+    assert!(out.contains("layout(location = 2) out vec4 rust_FragData2;"), "{out}");
+    assert!(!out.contains("gl_FragData"), "{out}");
+    // texture2DLod -> textureLod is what GL_ARB_shader_texture_lod buys a pack.
+    assert!(out.contains("textureLod(texture, texcoord.st, 2.0)"), "{out}");
+    assert!(!out.contains("texture2D("), "{out}");
+    // sampler2DShadow survives: ES 3.00 has it, and the precision block declares it.
+    assert!(out.contains("sampler2DShadow shadow;"), "{out}");
+
+    let out = assert_ok(OPTIFINE_COMPOSITE_FSH_120);
+    assert!(out.contains("textureLod(colortex0, uv, 1.0)"), "{out}");
+    assert!(out.contains("const float weight[3] = float[3]"), "{out}");
+}
+
+#[test]
+fn iris_330_packs_translate_and_keep_their_outputs() {
+    let out = assert_ok(IRIS_SHADOW_VSH_330);
+    assert!(out.starts_with("#version 300 es"), "{out}");
+    assert!(out.contains("in ivec2 UV2;"), "{out}");
+    assert!(out.contains("uniform mat4 shadowProjectionMatrix;"), "{out}");
+
+    let out = assert_ok(IRIS_DEFERRED_FSH_330);
+    // Explicit outputs, texelFetch on a depth attachment and a shadow sampler all survive.
+    assert!(out.contains("layout(location = 0) out vec4 fragColor;"), "{out}");
+    assert!(out.contains("texelFetch(depthtex0, px, 0)"), "{out}");
+    assert!(out.contains("texture(shadowtex0, vec3(texCoord, depth))"), "{out}");
+    assert!(out.contains("uniform sampler2DShadow shadowtex0;"), "{out}");
+
+    let out = assert_ok(IRIS_GBUFFERS_FSH_330);
+    assert!(!out.contains("rust_FragColor"), "a declared output must not be renamed: {out}");
+    assert!(out.contains("layout(location = 1) out vec4 fragData1;"), "{out}");
+    assert!(out.contains("textureLod(gtexture, texCoord, 0.0)"), "{out}");
+}

@@ -106,7 +106,7 @@ for match in re.finditer(r'const (\w+): &str = r(#?)"(.*?)"\2;', fixtures, re.S)
     shader = compile_src(text, stage, name)
     delete_shader(shader)
     print(f'PASS: GLES compile {name}', flush=True)
-assert fixture_count == 14, f'Expected all fourteen shader fixtures, found {fixture_count}'
+assert fixture_count == 20, f'Expected all twenty shader fixtures, found {fixture_count}'
 shader = compile_src('#version 330\nvoid main(){ EmitVertex(); }', 0x8B31,
                      'unsupported stage must fail instead of becoming a blank shader', False)
 delete_shader(shader)

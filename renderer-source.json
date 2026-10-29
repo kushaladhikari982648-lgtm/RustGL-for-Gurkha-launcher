@@ -18,7 +18,7 @@
     {
       "path": "crates/gl-compat/src/lib.rs",
       "upstreamBlob": "91c8b7fd74437f60ba97a5b8f889f886f24e08a3",
-      "summary": "driver entry-point cache takes a shared read lock on the hit path; shader translation results are memoized; compile/link status is read lazily (glGetShaderiv/glGetProgramiv) when the driver supports GL_KHR_parallel_shader_compile instead of stalling in glCompileShader."
+      "summary": "driver entry-point cache takes a shared read lock on the hit path; shader translation results are memoized; compile/link status is read lazily (glGetShaderiv/glGetProgramiv) when the driver supports GL_KHR_parallel_shader_compile; glUseProgram/glDeleteProgram track the current program so the draw paths do not query it per draw."
     },
     {
       "path": "crates/gl-compat/src/gl/v3_3.rs",
@@ -26,15 +26,35 @@
       "summary": "the CPU base-vertex re-base reuses a thread-local staging buffer instead of allocating one per draw."
     },
     {
+      "path": "crates/gl-compat/src/fixed_draw.rs",
+      "upstreamBlob": "2c76bb5e983a09a45483cc893a5b729d6f087d56",
+      "summary": "feeds the legacy fixed-function builtins (gl_Vertex, gl_Color, gl_Normal, gl_MultiTexCoord0..2 and the matrix stacks) as attributes and uniforms when the game draws its fixed-function arrays with its own program, which is how OptiFine and other shader packs draw; also reuses the GL_QUADS index buffer and skips the per-draw GL_CURRENT_PROGRAM query."
+    },
+    {
+      "path": "crates/gl-compat/src/fixed_func.rs",
+      "upstreamBlob": "2263be508dfb0bcae920a81653d4eb48535e3c1c",
+      "summary": "exposes the tracked normal array so shaders reading gl_Normal can be fed."
+    },
+    {
+      "path": "crates/gl-compat/src/gles3/mod.rs",
+      "upstreamBlob": "029c75598b13716db90669c36d40976dbc558be5",
+      "summary": "advertises the GLSL-only and format-only extensions shader packs probe for (GL_ARB_shader_texture_lod, GL_EXT_shader_texture_lod, GL_ARB_depth_texture, GL_ARB_shadow, GL_ARB_texture_float, GL_ARB_framebuffer_object, GL_EXT_texture_array, and the colour-buffer-float pair gated on real support), all of which ES 3.x backs."
+    },
+    {
+      "path": "crates/shader-translate/src/lib.rs",
+      "upstreamBlob": "5e026e8b0b67b535089cc3cb8104c5666387aad2",
+      "summary": "fixed-function builtins now translate to rust_gl_* attributes and uniforms that gl-compat feeds, instead of identity matrices that compiled and then collapsed the world into one place."
+    },
+    {
       "path": "crates/shader-translate/tests/mc_shader_fixtures.rs",
       "upstreamBlob": "8425e7970a0ff41a335b08d4597403b42cb74c52",
-      "summary": "added Iris/OptiFine, Sodium and legacy 1.12.2 shader fixtures that the GLES smoke test compiles on a real driver."
+      "summary": "added Iris/OptiFine, Sodium and legacy 1.12.2 shader fixtures - including the fixed-function builtins (ftransform, gl_Vertex, gl_MultiTexCoord, gl_TextureMatrix) that shader packs read - that the GLES smoke test compiles on a real driver."
     },
     {
       "path": "tests/render_smoke.py",
       "upstreamBlob": "4399a2b21181e996b1280857e1e32b337e170423",
-      "summary": "compile all fourteen shader fixtures instead of eight."
+      "summary": "compiles all twenty shader fixtures instead of eight, and picks the stage from any name carrying _VSH rather than _VSH_ exactly."
     }
   ],
-  "note": "The renderer is the Gurkha Launcher source above plus the documented localChanges (performance work on the GL shim and shader-compile coverage). tools/check_sync.py proves every other file is byte-identical."
+  "note": "The renderer is the Gurkha Launcher source above plus the documented localChanges (performance work, shader-pack support and shader-compile coverage). tools/check_sync.py proves every other file is byte-identical."
 }

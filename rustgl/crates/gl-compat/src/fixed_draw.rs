@@ -13,13 +13,13 @@
 
 use crate::fixed_func::{self, ArraySnapshot};
 use renderer_core::{Backend, BufferId, ProgramId, VertexArrayId};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const GL_STREAM_DRAW: u32 = 0x88E0;
-const GL_CURRENT_PROGRAM: u32 = 0x8B8D;
 const GL_VERTEX_ARRAY_BINDING: u32 = 0x85B5;
 const GL_ARRAY_BUFFER_BINDING: u32 = 0x8894;
 const GL_VERTEX_SHADER: u32 = 0x8B31;
@@ -307,10 +307,14 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
         Some(f) => f,
         None => return false,
     };
-    let mut cur = 0i32;
-    get_int(GL_CURRENT_PROGRAM, &mut cur);
+    // Tracked by glUseProgram instead of queried: this runs on every glDrawArrays, and a
+    // driver query per draw is exactly the overhead the weakest devices cannot absorb.
+    let cur = crate::current_program();
     if cur != 0 {
-        return false; // the game uses its own shaders
+        // The game runs its own shader. Legacy shader packs (OptiFine) draw with the
+        // fixed-function arrays and read gl_Vertex / gl_ModelViewProjectionMatrix, so the
+        // arrays and matrices still have to be fed - see draw_arrays_with_program.
+        return draw_arrays_with_program(be, mode, first, count, cur);
     }
     let (pos, col, uv) = fixed_func::arrays();
     if !pos.enabled {
@@ -409,10 +413,6 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
         ));
     }
 
-    // Save program so we do not leave the FF shader bound for the game's next draw.
-    let mut prev_prog = 0i32;
-    get_int(GL_CURRENT_PROGRAM, &mut prev_prog);
-
     be.use_program(Some(gpu.prog));
     be.uniform_matrix_4(gpu.loc_mvp, &fixed_func::mvp_matrix(), false);
     be.uniform_1i(gpu.loc_tex, 0);
@@ -446,16 +446,9 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
 
     if mode == GL_QUADS {
         let quads = (count / 4) as usize;
-        let mut idx: Vec<u32> = Vec::with_capacity(quads * 6);
-        for q in 0..quads {
-            let b = (q * 4) as u32;
-            idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
-        }
-        // SAFETY: reinterpreting a live Vec<u32> as bytes (same allocation, len * 4).
-        let bytes = std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * 4);
-        be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(gpu.ebo));
-        if be.buffer_data(GL_ELEMENT_ARRAY_BUFFER, bytes, GL_STREAM_DRAW).is_ok() {
-            be.draw_elements(GL_TRIANGLES, idx.len() as i32, GL_UNSIGNED_INT, 0);
+        if let Some((buf, need)) = quad_indices(be, quads) {
+            be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
+            be.draw_elements(GL_TRIANGLES, need as i32, GL_UNSIGNED_INT, 0);
         }
     } else {
         be.draw_arrays(mode, 0, count);
@@ -468,11 +461,277 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
 
     restore(be, prev_vao, prev_abuf);
     // Restore the game's program (0 = fixed-function / none).
-    if prev_prog != 0 {
-        be.use_program(Some(ProgramId(prev_prog as u32)));
+    if cur != 0 {
+        be.use_program(Some(ProgramId(cur)));
     } else {
         be.use_program(None);
     }
+    true
+}
+
+/// Index buffer for the GL_QUADS -> triangles expansion, grown instead of rebuilt.
+///
+/// 1.12.2 draws its GUI and its chunks as quads, so the old code allocated a `Vec` and
+/// uploaded it on every single draw: hundreds of allocations and buffer orphans per frame,
+/// on the CPUs that can least afford them. The pattern is a prefix of itself, so a bigger
+/// buffer can serve every smaller draw.
+static QUAD_INDICES: Mutex<Option<(BufferId, usize)>> = Mutex::new(None);
+
+unsafe fn quad_indices(be: &dyn Backend, quads: usize) -> Option<(BufferId, usize)> {
+    let need = quads * 6;
+    let mut slot = QUAD_INDICES.lock().unwrap_or_else(|e| e.into_inner());
+    let (buf, have) = match *slot {
+        Some(cached) => cached,
+        None => (be.create_buffer().ok()?, 0usize),
+    };
+    if have < need {
+        let mut idx: Vec<u32> = Vec::with_capacity(need);
+        for q in 0..quads {
+            let b = (q * 4) as u32;
+            idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+        }
+        // SAFETY: reinterpreting a live Vec<u32> as bytes (same allocation, len * 4).
+        let bytes = std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * 4);
+        be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
+        be.buffer_data(GL_ELEMENT_ARRAY_BUFFER, bytes, GL_STREAM_DRAW).ok()?;
+        *slot = Some((buf, need));
+    }
+    Some((buf, need))
+}
+
+/// Attribute and uniform locations of the legacy fixed-function builtins in a linked program.
+///
+/// Cached per program: `glGetAttribLocation` / `glGetUniformLocation` are cheap once, but
+/// running a dozen of them on every draw is not, and the weakest devices this renderer
+/// targets cannot spare a driver round trip per draw call.
+#[derive(Clone, Copy)]
+struct LegacyLocations {
+    position: i32,
+    normal: i32,
+    color: i32,
+    texcoord: [i32; 4],
+    mvp: i32,
+    modelview: i32,
+    projection: i32,
+    normal_matrix: i32,
+    texture_matrix: [i32; 4],
+}
+
+impl LegacyLocations {
+    fn feeds_anything(&self) -> bool {
+        self.position >= 0
+            || self.normal >= 0
+            || self.color >= 0
+            || self.mvp >= 0
+            || self.modelview >= 0
+            || self.projection >= 0
+            || self.normal_matrix >= 0
+            || self.texcoord.iter().any(|l| *l >= 0)
+            || self.texture_matrix.iter().any(|l| *l >= 0)
+    }
+}
+
+static LEGACY_LOCS: Mutex<Option<HashMap<u32, LegacyLocations>>> = Mutex::new(None);
+
+/// Forgets the cached builtin locations of `program`. Called when it is relinked or deleted:
+/// a re-linked program does not keep its old locations.
+pub fn forget_legacy_locations(program: u32) {
+    let mut guard = LEGACY_LOCS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        map.remove(&program);
+    }
+}
+
+/// Resolves the builtin locations of `program` once, then caches them.
+fn legacy_locations(program: u32) -> Option<LegacyLocations> {
+    {
+        let guard = LEGACY_LOCS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(map) = guard.as_ref() {
+            if let Some(locs) = map.get(&program) {
+                return Some(*locs);
+            }
+        }
+    }
+    let be = crate::backend()?;
+    type AttribLoc = unsafe extern "C" fn(u32, *const std::ffi::c_char) -> i32;
+    let attrib = crate::driver_fn_cached::<AttribLoc>("glGetAttribLocation")?;
+    let mut attrib_of = |name: &str| -> i32 {
+        match std::ffi::CString::new(name) {
+            Ok(c) => attrib(program, c.as_ptr()),
+            Err(_) => -1,
+        }
+    };
+    let mut uniform_of = |name: &str| -> i32 {
+        be.uniform_location(ProgramId(program), name).unwrap_or(-1)
+    };
+    let mut texcoord = [-1i32; 4];
+    for (i, entry) in shader_translate::LEGACY_TEXCOORD_ATTRIBS.iter().enumerate() {
+        texcoord[i] = attrib_of(entry.0);
+    }
+    let mut texture_matrix = [-1i32; 4];
+    for (i, name) in shader_translate::LEGACY_TEXTURE_MATRIX_UNIFORMS.iter().enumerate() {
+        texture_matrix[i] = uniform_of(name);
+    }
+    let locs = LegacyLocations {
+        position: attrib_of(shader_translate::LEGACY_POSITION_ATTRIB.0),
+        normal: attrib_of(shader_translate::LEGACY_NORMAL_ATTRIB.0),
+        color: attrib_of(shader_translate::LEGACY_COLOR_ATTRIB.0),
+        texcoord,
+        mvp: uniform_of(shader_translate::LEGACY_MVP_UNIFORM),
+        modelview: uniform_of(shader_translate::LEGACY_MODELVIEW_UNIFORM),
+        projection: uniform_of(shader_translate::LEGACY_PROJECTION_UNIFORM),
+        normal_matrix: uniform_of(shader_translate::LEGACY_NORMAL_MATRIX_UNIFORM),
+        texture_matrix,
+    };
+    let mut guard = LEGACY_LOCS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.get_or_insert_with(HashMap::new).insert(program, locs);
+    Some(locs)
+}
+
+/// Buffers for the arrays the legacy-shader path uploads, created once.
+static LEGACY_BUFFERS: Mutex<Option<([BufferId; 4], BufferId)>> = Mutex::new(None);
+
+fn legacy_buffers(be: &dyn Backend) -> Option<([BufferId; 4], BufferId)> {
+    let mut guard = LEGACY_BUFFERS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(buffers) = *guard {
+        return Some(buffers);
+    }
+    let vbo = [
+        be.create_buffer().ok()?,
+        be.create_buffer().ok()?,
+        be.create_buffer().ok()?,
+        be.create_buffer().ok()?,
+    ];
+    let ebo = be.create_buffer().ok()?;
+    *guard = Some((vbo, ebo));
+    Some((vbo, ebo))
+}
+
+/// Draws the tracked fixed-function arrays with the game's own program.
+///
+/// OptiFine (and any other shader that runs while the game still draws with `glVertexPointer`
+/// / `glColorPointer`) reads `gl_Vertex`, `gl_MultiTexCoord0` and
+/// `gl_ModelViewProjectionMatrix`. GLSL ES has none of them, so shader-translate renamed them
+/// onto `rust_gl_*` attributes and uniforms; this looks those up and feeds the client arrays
+/// and the current matrix stacks, which is what a desktop compatibility profile does.
+///
+/// Returns false when the program declares none of them - that is a modern shader drawing its
+/// own buffers, which this path must not touch.
+unsafe fn draw_arrays_with_program(
+    be: &dyn Backend,
+    mode: u32,
+    first: i32,
+    count: i32,
+    program: u32,
+) -> bool {
+    let locs = match legacy_locations(program) {
+        Some(locs) if locs.feeds_anything() => locs,
+        _ => return false,
+    };
+    let (vbo, ebo) = match legacy_buffers(be) {
+        Some(buffers) => buffers,
+        None => return false,
+    };
+    let (pos, col, _uv) = fixed_func::arrays();
+    let normal = fixed_func::normal_array();
+    if !pos.enabled && !col.enabled && !normal.enabled && !fixed_func::texcoord_unit(0).enabled {
+        return false;
+    }
+
+    type GetInt = unsafe extern "C" fn(u32, *mut i32);
+    let get_int = match crate::driver_fn_cached::<GetInt>("glGetIntegerv") {
+        Some(f) => f,
+        None => return false,
+    };
+    let mut prev_abuf = 0i32;
+    get_int(GL_ARRAY_BUFFER_BINDING, &mut prev_abuf);
+
+    type Attrib4f = unsafe extern "C" fn(u32, f32, f32, f32, f32);
+    let attrib4f = crate::driver_fn_cached::<Attrib4f>("glVertexAttrib4f");
+
+    if locs.position >= 0 && pos.enabled {
+        setup_attrib(be, locs.position as u32, &pos, vbo[0], first, count, false);
+    }
+    if locs.color >= 0 {
+        if col.enabled {
+            setup_attrib(be, locs.color as u32, &col, vbo[1], first, count, true);
+        } else {
+            be.set_vertex_attrib_enabled(locs.color as u32, false);
+            if let Some(f) = attrib4f {
+                let c = fixed_func::current_color();
+                f(locs.color as u32, c[0], c[1], c[2], c[3]);
+            }
+        }
+    }
+    if locs.normal >= 0 && normal.enabled {
+        setup_attrib(be, locs.normal as u32, &normal, vbo[2], first, count, false);
+    }
+    for (unit, loc) in locs.texcoord.iter().enumerate() {
+        if *loc < 0 || unit > 2 {
+            continue;
+        }
+        let array = fixed_func::texcoord_unit(unit);
+        if array.enabled {
+            setup_attrib(be, *loc as u32, &array, vbo[3], first, count, false);
+        } else {
+            be.set_vertex_attrib_enabled(*loc as u32, false);
+            if let Some(f) = attrib4f {
+                let t = fixed_func::current_texcoord(unit);
+                f(*loc as u32, t[0], t[1], 0.0, 1.0);
+            }
+        }
+    }
+
+    // Matrices: gl-compat tracks the stacks the game loaded, so feed them the same way a
+    // compatibility profile would. gl_NormalMatrix gets the upper left 3x3 of the modelview:
+    // exact for the rotations and uniform scales Minecraft uses, and an inverse transpose
+    // per draw is not worth it on the hardware at the bottom of the range.
+    if locs.mvp >= 0 {
+        be.uniform_matrix_4(locs.mvp, &fixed_func::mvp_matrix(), false);
+    }
+    if locs.modelview >= 0 {
+        be.uniform_matrix_4(locs.modelview, &fixed_func::modelview_matrix(), false);
+    }
+    if locs.projection >= 0 {
+        if let Some(p) = fixed_func::matrix_for_pname(0x0BA7) {
+            be.uniform_matrix_4(locs.projection, &p, false);
+        }
+    }
+    if locs.normal_matrix >= 0 {
+        let mv = fixed_func::modelview_matrix();
+        let m3 = [mv[0], mv[1], mv[2], mv[4], mv[5], mv[6], mv[8], mv[9], mv[10]];
+        type Uniform3 = unsafe extern "C" fn(i32, i32, u8, *const f32);
+        if let Some(f) = crate::driver_fn_cached::<Uniform3>("glUniformMatrix3fv") {
+            f(locs.normal_matrix, 1, 0, m3.as_ptr());
+        }
+    }
+    for (unit, loc) in locs.texture_matrix.iter().enumerate() {
+        if *loc >= 0 {
+            be.uniform_matrix_4(*loc, &fixed_func::texture_matrix(unit), false);
+        }
+    }
+
+    if mode == GL_QUADS {
+        let quads = (count / 4) as usize;
+        if let Some((buf, need)) = quad_indices(be, quads) {
+            be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
+            be.draw_elements(GL_TRIANGLES, need as i32, GL_UNSIGNED_INT, 0);
+        }
+    } else {
+        be.draw_arrays(mode, 0, count);
+    }
+
+    let err = be.get_error();
+    if err != 0 && ERRS.fetch_add(1, Ordering::Relaxed) < 20 {
+        crate::log(&format!(
+            "[FFDraw] GL error 0x{err:04X} after a legacy-shader draw mode=0x{mode:04X} count={count}"
+        ));
+    }
+    let _ = ebo;
+    be.bind_buffer(
+        GL_ARRAY_BUFFER,
+        if prev_abuf > 0 { Some(BufferId(prev_abuf as u32)) } else { None },
+    );
     true
 }
 
