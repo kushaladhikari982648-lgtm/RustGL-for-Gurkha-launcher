@@ -1682,6 +1682,14 @@ mod tests {
         assert!(o.contains("uniform mat4 rust_gl_ModelViewProjectionMatrix;"), "{o}");
     }
 
+    /// True when `name` still appears *unprefixed*, i.e. as the desktop builtin rather than
+    /// as one of the `rust_<name>` attributes and uniforms this translator emits.
+    fn bare_builtin(source: &str, name: &str) -> bool {
+        source
+            .replace(&format!("rust_{name}"), "")
+            .contains(name)
+    }
+
     #[test]
     fn optifine_fixed_function_builtins_become_fed_attributes_and_uniforms() {
         // The shape every OptiFine / 1.12.2 pack template starts from.
@@ -1701,12 +1709,14 @@ void main() {\n\
         assert!(o.contains("uniform mat4 rust_gl_TextureMatrix1;"), "{o}");
         assert!(o.contains("gl_Position = (rust_gl_ModelViewProjectionMatrix * rust_gl_Vertex)"), "{o}");
         assert!(o.contains("texcoord = rust_gl_TextureMatrix0 * rust_gl_MultiTexCoord0;"), "{o}");
-        assert!(!o.contains("gl_MultiTexCoord"), "{o}");
+        // No *bare* builtin may survive: rust_gl_MultiTexCoord0 is the attribute gl-compat
+        // feeds, gl_MultiTexCoord0 is the desktop builtin that would fail the compile.
+        assert!(!bare_builtin(&o, "gl_MultiTexCoord"), "{o}");
         assert!(!o.contains("mat4(1.0)"), "{o}");
         // A fragment shader gets no vertex attributes and no undeclared identifier.
         let f = translate("#version 120\nvoid main(){ gl_FragColor = gl_Color; }\n").unwrap();
-        assert!(f.contains("gl_FragColor".replace("gl_FragColor", "rust_FragColor").as_str()), "{f}");
-        assert!(!f.contains("gl_Color"), "{f}");
+        assert!(f.contains("rust_FragColor"), "{f}");
+        assert!(!bare_builtin(&f, "gl_Color"), "{f}");
     }
 
     #[test]
