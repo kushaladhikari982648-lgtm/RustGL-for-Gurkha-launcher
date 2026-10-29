@@ -628,7 +628,7 @@ unsafe fn draw_arrays_with_program(
         Some(locs) if locs.feeds_anything() => locs,
         _ => return false,
     };
-    let (vbo, ebo) = match legacy_buffers(be) {
+    let (vbo, _ebo) = match legacy_buffers(be) {
         Some(buffers) => buffers,
         None => return false,
     };
@@ -727,7 +727,6 @@ unsafe fn draw_arrays_with_program(
             "[FFDraw] GL error 0x{err:04X} after a legacy-shader draw mode=0x{mode:04X} count={count}"
         ));
     }
-    let _ = ebo;
     be.bind_buffer(
         GL_ARRAY_BUFFER,
         if prev_abuf > 0 { Some(BufferId(prev_abuf as u32)) } else { None },

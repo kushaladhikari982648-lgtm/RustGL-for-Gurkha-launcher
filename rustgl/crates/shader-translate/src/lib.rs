@@ -140,40 +140,41 @@ fn rewrite_legacy_builtins(src: &str, is_frag: bool) -> String {
 /// may have meant for something else.
 fn legacy_builtin_decls(src: &str, uses_ftransform: bool) -> String {
     let mut out = String::new();
-    let mut attrib = |location: u32, ty: &str, name: &str| {
+    let attrib = |out: &mut String, location: u32, ty: &str, name: &str| {
         out.push_str(&format!("layout(location = {location}) in {ty} {name};\n"));
     };
+    let matrix = |out: &mut String, name: &str| out.push_str(&format!("uniform mat4 {name};\n"));
+
     if uses_ftransform || ident_used(src, "gl_Vertex") {
-        attrib(LEGACY_POSITION_ATTRIB.1, "vec4", LEGACY_POSITION_ATTRIB.0);
+        attrib(&mut out, LEGACY_POSITION_ATTRIB.1, "vec4", LEGACY_POSITION_ATTRIB.0);
     }
     if ident_used(src, "gl_Normal") {
-        attrib(LEGACY_NORMAL_ATTRIB.1, "vec3", LEGACY_NORMAL_ATTRIB.0);
+        attrib(&mut out, LEGACY_NORMAL_ATTRIB.1, "vec3", LEGACY_NORMAL_ATTRIB.0);
     }
     if ident_used(src, "gl_Color") {
-        attrib(LEGACY_COLOR_ATTRIB.1, "vec4", LEGACY_COLOR_ATTRIB.0);
+        attrib(&mut out, LEGACY_COLOR_ATTRIB.1, "vec4", LEGACY_COLOR_ATTRIB.0);
     }
     for i in 0..LEGACY_TEXCOORD_ATTRIBS.len() {
         if ident_used(src, &format!("gl_MultiTexCoord{i}")) {
             let (name, location) = LEGACY_TEXCOORD_ATTRIBS[i];
-            attrib(location, "vec4", name);
+            attrib(&mut out, location, "vec4", name);
         }
     }
-    let mut uniform = |name: &str| out.push_str(&format!("uniform mat4 {name};\n"));
     if uses_ftransform || ident_used(src, "gl_ModelViewProjectionMatrix") {
-        uniform(LEGACY_MVP_UNIFORM);
+        matrix(&mut out, LEGACY_MVP_UNIFORM);
     }
     if ident_used(src, "gl_ModelViewMatrix") {
-        uniform(LEGACY_MODELVIEW_UNIFORM);
+        matrix(&mut out, LEGACY_MODELVIEW_UNIFORM);
     }
     if ident_used(src, "gl_ProjectionMatrix") {
-        uniform(LEGACY_PROJECTION_UNIFORM);
+        matrix(&mut out, LEGACY_PROJECTION_UNIFORM);
     }
     if ident_used(src, "gl_NormalMatrix") {
         out.push_str(&format!("uniform mat3 {LEGACY_NORMAL_MATRIX_UNIFORM};\n"));
     }
     for (i, name) in LEGACY_TEXTURE_MATRIX_UNIFORMS.iter().enumerate() {
         if src.contains(&format!("gl_TextureMatrix[{i}]")) {
-            uniform(name);
+            matrix(&mut out, name);
         }
     }
     out
