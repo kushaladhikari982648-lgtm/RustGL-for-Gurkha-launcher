@@ -1783,8 +1783,10 @@ mod tests {
         // OptiFine's gbuffers_terrain template: a sampler called `texture`, which in
         // GLSL ES 3.00 hides the function its texture2D() calls are rewritten to.
         let o = translate(
-            "#version 120\nuniform sampler2D texture;\nvarying vec2 uv;\
-void main(){ gl_FragColor = texture2D(texture, uv); }\n",
+            "#version 120\n\
+             uniform sampler2D texture;\n\
+             varying vec2 uv;\n\
+             void main(){ gl_FragColor = texture2D(texture, uv); }\n",
         )
         .unwrap();
         assert!(o.contains("uniform sampler2D rust_texture;"), "{o}");
@@ -1792,8 +1794,11 @@ void main(){ gl_FragColor = texture2D(texture, uv); }\n",
         assert!(!o.contains("texture2D("), "{o}");
         // A GLSL 330 pack calling texture() declares no such variable, so it is untouched.
         let i = translate(
-            "#version 330\nuniform sampler2D gtexture;\nin vec2 uv;\nout vec4 c;\
-void main(){ c = texture(gtexture, uv); }\n",
+            "#version 330\n\
+             uniform sampler2D gtexture;\n\
+             in vec2 uv;\n\
+             out vec4 c;\n\
+             void main(){ c = texture(gtexture, uv); }\n",
         )
         .unwrap();
         assert!(i.contains("texture(gtexture, uv)"), "{i}");
