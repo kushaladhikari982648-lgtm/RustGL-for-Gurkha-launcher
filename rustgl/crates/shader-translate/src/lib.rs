@@ -133,6 +133,87 @@ fn rewrite_legacy_builtins(src: &str, is_frag: bool) -> String {
     s
 }
 
+/// Names that are built-in **functions** in GLSL ES 3.00 but were ordinary variable names in
+/// the desktop GLSL the packs were written against. OptiFine's own `gbuffers_terrain`
+/// template opens with `uniform sampler2D texture;`, and once its `texture2D()` calls become
+/// `texture()` calls that sampler hides the function: the driver reports "no function with
+/// name 'texture'" and the pack never compiles.
+const ES3_FUNCTION_NAMES: &[&str] = &[
+    "texture",
+    "textureLod",
+    "textureProj",
+    "textureGrad",
+    "textureSize",
+    "texelFetch",
+];
+
+fn is_glsl_type(word: &str) -> bool {
+    matches!(
+        word,
+        "float"
+            | "int"
+            | "uint"
+            | "bool"
+            | "double"
+            | "vec2"
+            | "vec3"
+            | "vec4"
+            | "ivec2"
+            | "ivec3"
+            | "ivec4"
+            | "uvec2"
+            | "uvec3"
+            | "uvec4"
+            | "bvec2"
+            | "bvec3"
+            | "bvec4"
+            | "mat2"
+            | "mat3"
+            | "mat4"
+            | "mat2x2"
+            | "mat2x3"
+            | "mat2x4"
+            | "mat3x2"
+            | "mat3x3"
+            | "mat3x4"
+            | "mat4x2"
+            | "mat4x3"
+            | "mat4x4"
+    ) || word.contains("sampler")
+}
+
+/// Whether `src` **declares** a variable called `name`, as opposed to calling it. A call is
+/// preceded by `=` or a comma, a declaration by a type: that is the only difference that
+/// matters here, because one has to be renamed and the other must not be.
+fn declares_variable(src: &str, name: &str) -> bool {
+    let mut previous = String::new();
+    for word in src
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|w| !w.is_empty())
+    {
+        if word == name && is_glsl_type(&previous) {
+            return true;
+        }
+        previous = word.to_string();
+    }
+    false
+}
+
+/// Renames variables that would otherwise shadow an ES 3.00 built-in function.
+///
+/// Only the pack's own variable is renamed - a real GLSL 330 `texture()` call is a call, not a
+/// declaration, and is left alone - and the name is not observable from outside the shader, so
+/// nothing the game binds has to know about it.
+fn rename_shadowing_builtins(src: &str) -> String {
+    let mut out = src.to_string();
+    for name in ES3_FUNCTION_NAMES {
+        if declares_variable(&out, name) {
+            out = replace_ident(&out, name, &format!("rust_{name}"));
+        }
+    }
+    out
+}
+
 /// Declares the legacy builtins `src` actually references, as attributes and uniforms.
 ///
 /// Only emitted for vertex shaders (the fixed-function builtins are vertex-stage state) and
@@ -1218,11 +1299,18 @@ pub fn translate_with_texture_buffers(src: &str, texture_buffers: TextureBufferS
     // float call and is left for ES's own overload; what is left taking integers is retargeted
     // to the helper, which is injected only when something actually needed it.
     let (mod_rewritten_source, needs_int_mod) = numeric::rewrite_int_mod(&widened_source);
+    // Before the per-line rewrite below, which turns texture2D() into texture(): the sampler
+    // has to be renamed while it still carries the name it declared.
+    let unshadowed_source = if use_300 {
+        rename_shadowing_builtins(&mod_rewritten_source)
+    } else {
+        mod_rewritten_source
+    };
 
     // Save original source for fragment/vertex detection before macroization
-    let original_source = mod_rewritten_source.clone();
+    let original_source = unshadowed_source.clone();
 
-    let sanitized_source = macroize_nonconstant_globals(&mod_rewritten_source);
+    let sanitized_source = macroize_nonconstant_globals(&unshadowed_source);
     let src = sanitized_source.as_str();
 
     // Fragment/vertex detection must run on the ORIGINAL source before sanitization
@@ -1688,6 +1776,28 @@ mod tests {
         source
             .replace(&format!("rust_{name}"), "")
             .contains(name)
+    }
+
+    #[test]
+    fn sampler_named_texture_is_renamed_and_real_calls_are_not() {
+        // OptiFine's gbuffers_terrain template: a sampler called `texture`, which in
+        // GLSL ES 3.00 hides the function its texture2D() calls are rewritten to.
+        let o = translate(
+            "#version 120\nuniform sampler2D texture;\nvarying vec2 uv;\
+void main(){ gl_FragColor = texture2D(texture, uv); }\n",
+        )
+        .unwrap();
+        assert!(o.contains("uniform sampler2D rust_texture;"), "{o}");
+        assert!(o.contains("texture(rust_texture, uv)"), "{o}");
+        assert!(!o.contains("texture2D("), "{o}");
+        // A GLSL 330 pack calling texture() declares no such variable, so it is untouched.
+        let i = translate(
+            "#version 330\nuniform sampler2D gtexture;\nin vec2 uv;\nout vec4 c;\
+void main(){ c = texture(gtexture, uv); }\n",
+        )
+        .unwrap();
+        assert!(i.contains("texture(gtexture, uv)"), "{i}");
+        assert!(!i.contains("rust_texture"), "{i}");
     }
 
     #[test]

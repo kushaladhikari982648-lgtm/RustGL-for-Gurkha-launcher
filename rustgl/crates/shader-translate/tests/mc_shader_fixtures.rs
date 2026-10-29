@@ -919,7 +919,10 @@ fn optifine_120_pack_translates_onto_fed_builtins() {
     assert!(out.contains("layout(location = 2) out vec4 rust_FragData2;"), "{out}");
     assert!(!out.contains("gl_FragData"), "{out}");
     // texture2DLod -> textureLod is what GL_ARB_shader_texture_lod buys a pack.
-    assert!(out.contains("textureLod(texture, texcoord.st,"), "{out}");
+    // `uniform sampler2D texture;` is OptiFine's own name, and ES 3.00 makes `texture` a
+    // function: the sampler is renamed, the call keeps its new spelling.
+    assert!(out.contains("uniform sampler2D rust_texture;"), "{out}");
+    assert!(out.contains("textureLod(rust_texture, texcoord.st,"), "{out}");
     assert!(!out.contains("texture2D("), "{out}");
     // sampler2DShadow survives: ES 3.00 has it, and the precision block declares it.
     assert!(out.contains("sampler2DShadow shadow;"), "{out}");

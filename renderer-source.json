@@ -43,7 +43,7 @@
     {
       "path": "crates/shader-translate/src/lib.rs",
       "upstreamBlob": "5e026e8b0b67b535089cc3cb8104c5666387aad2",
-      "summary": "fixed-function builtins now translate to rust_gl_* attributes and uniforms that gl-compat feeds, instead of identity matrices that compiled and then collapsed the world into one place."
+      "summary": "fixed-function builtins now translate to rust_gl_* attributes and uniforms that gl-compat feeds, instead of identity matrices that compiled and then collapsed the world into one place; and a variable that would shadow an ES 3.00 built-in function - OptiFine's own `uniform sampler2D texture;` - is renamed, or the texture() call it is rewritten to finds no function."
     },
     {
       "path": "crates/shader-translate/tests/mc_shader_fixtures.rs",
