@@ -96,6 +96,15 @@ Zalith truncates values at the second `=`. If you use the v1 entry on Minecraft
   need Vulkan are outside what RustGL provides.
 - If a device reports OpenGL ES 3 but the driver is incomplete, expect missing
   geometry or a black screen; that is a driver limitation, not a launcher bug.
+- **Shader packs** work through two routes. OptiFine-style packs for
+  1.7.10-1.12.2 (GLSL 120, `gl_FragData` MRT, `texture2DLod`) have their
+  fixed-function builtins translated onto attributes and uniforms this renderer
+  feeds from the arrays and matrix stacks it tracks; Iris and Sodium packs
+  (GLSL 330) are passed through untouched. Packs that need geometry,
+  tessellation, compute, image load/store or SSBOs are rejected with a logged
+  reason - ES 3.x has no equivalent, so they cannot work here. No pack has been
+  run end to end on a device: what CI proves is that twenty shader dialects,
+  six of them pack dialects, compile on a real GLES driver.
 
 ## Signing and updates
 

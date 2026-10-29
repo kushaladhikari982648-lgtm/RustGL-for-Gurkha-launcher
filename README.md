@@ -18,7 +18,26 @@ plugin APK** for Minecraft: Java Edition launchers on Android.
 | `tests/` | Contract tests for the manifest, the v2 config and the packaging helpers - plain Python, no SDK. |
 | `src/`, `res/` | The original desktop RustGL demo (SDL2 + OpenGL) this repository started as. Kept for reference; it is not part of the Android plugin. |
 | `docs/UNIVERSAL_APK.md` | Install, per-launcher notes, environment variables, limitations, signing and rebuild instructions. |
-| `docs/PERFORMANCE.md` | What was optimized in the renderer (per-call locking, shader translation caching, compile/link stalls, per-draw allocations), how the driver capability tiers work, and what is **not** measured. |
+| `docs/PERFORMANCE.md` | What was optimized in the renderer (per-call locking, shader translation caching, compile/link stalls, per-draw allocations), how the driver capability tiers work, how **shader packs** work on this renderer (OptiFine 1.7.10-1.12.2 and Iris/Sodium), and what is **not** measured. |
+
+## Shader packs
+
+OptiFine-style packs for 1.7.10-1.12.2 - the ones the weakest devices are stuck
+on - draw with `glVertexPointer`/`glColorPointer` and read `gl_Vertex`,
+`gl_MultiTexCoord0` and `gl_ModelViewProjectionMatrix` in their GLSL. GLSL ES has
+none of those, so the renderer translates them onto attributes and uniforms it
+feeds from the vertex arrays and matrix stacks it already tracks, and advertises
+the extensions packs probe (`GL_ARB_shader_texture_lod` and friends) so they
+enable their real code path instead of a fallback. Modern Iris and Sodium packs
+(GLSL 330, `texelFetch`, MRT) are untouched by that translation and take the
+path they always did.
+
+Geometry, tessellation, compute, image load/store and SSBOs have no ES 3.x
+equivalent and are still rejected with a logged reason rather than rendering
+black. Twenty shader fixtures - six of them the pack dialects above - compile on
+a real GLES driver in CI on every push. What is **not** verified is a pack
+running end to end on a phone; see the closing section of
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md#what-is-not-claimed).
 
 ## The universal APK
 

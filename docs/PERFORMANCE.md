@@ -10,7 +10,7 @@ to produce it; see [What is not claimed](#what-is-not-claimed).
 
 ## What changed
 
-All four changes are inside the renderer's own GL entry points, so they apply to
+All six changes are inside the renderer's own GL entry points, so they apply to
 every launcher the plugin is installed in.
 
 ### 1. Per-call lock contention (`crates/gl-compat/src/lib.rs`)
@@ -76,6 +76,29 @@ Known cost that remains on that path: the element buffer is still mapped
 that needs a CPU-side mirror of the index data with a correctness argument about
 when the GPU-side copy changes, which is a bigger change than this round.
 
+### 5. The current program is tracked, not queried (`crates/gl-compat/src/lib.rs`, `fixed_draw.rs`)
+
+The fixed-function draw path asked the driver for `GL_CURRENT_PROGRAM` with
+`glGetIntegerv` on every `glDrawArrays` - twice for a fixed-function draw: once
+to see whether the game had a shader bound, once to put it back. On a driver
+where a query means a round trip into the DDK, that is paid per draw, and chunk
+rendering is thousands of draws per frame.
+
+`glUseProgram` and `glDeleteProgram` now keep the value in the shim (one atomic
+integer), and the draw path reads it. No query, and the save/restore pair around
+the internal blit program is gone too: the two entry points that could change it
+are the only ones that update the value.
+
+### 6. `GL_QUADS` no longer allocates per draw (`crates/gl-compat/src/fixed_draw.rs`)
+
+ES has no `GL_QUADS`, so a quad draw was expanded into triangle indices on the
+CPU - and the index vector was allocated and uploaded **per draw**. Minecraft
+1.12.2 and older draw chunks, the GUI and the debug overlay as quads, so this
+was the common case on exactly the version range the weakest devices are stuck
+on. The index buffer is now cached and only grows; a second quad draw of the
+same or smaller size uploads nothing, and a larger one reuses the first run's
+indices rather than rebuilding them from scratch.
+
 ## Scaling from a GE8300 to a Snapdragon 8 Gen 5
 
 One binary, no device list. The renderer already discovers what the driver can
@@ -89,16 +112,65 @@ accordingly:
 | ES 3.2 / `GL_EXT_texture_buffer` / `GL_OES_texture_buffer` | texture-buffer shaders | the shader is translated for what the driver has, or rejected with a logged reason instead of rendering blank |
 | ES 3.1+ compute, indirect draw, texture view | passthrough | not advertised, so the game never picks the path |
 
-The four changes above are deliberately on the paths that cost the *most* on
+The changes above are deliberately on the paths that cost the *most* on
 weak hardware rather than the paths that only matter at the top end: a
 Cortex-A53 has no spare core for allocator churn and shader retranslation, while
 a flagship's problem is thread serialisation - which item 1 addresses.
+
+## Shader packs
+
+This is the change that makes shader packs usable rather than merely compiling.
+
+**The problem.** OptiFine 1.12.2 and older (and every pack written for it) keeps
+drawing with `glVertexPointer` / `glColorPointer` / `glTexCoordPointer` and reads
+the fixed-function builtins in its GLSL: `gl_Vertex`, `gl_MultiTexCoord0`,
+`gl_ModelViewProjectionMatrix`, `gl_TextureMatrix`, `ftransform()`. GLSL ES has
+none of them. Previously the translator replaced the matrices with identity
+matrices and left the vertex arrays undeclared: the shader either failed to
+compile or compiled and then collapsed the entire world into one place.
+
+**What it does now.**
+
+* `crates/shader-translate/src/lib.rs` rewrites those builtins onto `rust_gl_*`
+  attributes and uniforms and declares only the ones a shader actually
+  references, using the locations a desktop compatibility profile would use
+  (vertex 0, normal 2, colour 3, `gl_MultiTexCoordN` at 8+N), so the numbers
+  packs hardcode still line up.
+* `crates/gl-compat/src/fixed_draw.rs` resolves those names once per program
+  (cached until the program is re-linked) and, when the game draws its
+  fixed-function arrays with its own program bound, uploads the client arrays it
+  already tracks and pushes the matrix stacks it already tracks. A program with
+  none of those names is untouched, so modern Iris and Sodium shaders take
+  exactly the path they took before.
+* `gl_NormalMatrix` gets the upper-left 3x3 of the modelview matrix. That is
+  exact for the rotations and uniform scales Minecraft issues; a full inverse
+  transpose per draw is not worth its cost at the bottom of the range.
+* `crates/gl-compat/src/gles3/mod.rs` advertises the GLSL-only and format-only
+  extensions packs probe before they enable a code path - `GL_ARB_shader_texture_lod`
+  (OptiFine turns advertised extensions into the `MC_GL_*` macros its shaders test
+  with `#ifdef`), `GL_EXT_shader_texture_lod`, `GL_ARB_depth_texture`,
+  `GL_ARB_shadow`, `GL_ARB_texture_float`, `GL_ARB_framebuffer_object`,
+  `GL_EXT_texture_array`, and the colour-buffer-float pair - all of which ES 3.x
+  genuinely backs. Nothing is advertised that the renderer cannot serve.
+
+**What that gets you, and what it does not.** The two families of packs:
+
+| Pack family | Route | Status |
+|---|---|---|
+| OptiFine 1.7.10-1.12.2 (GLSL 120, `gl_FragData` MRT, `texture2DLod`, `sampler2DShadow`) | fixed-function arrays + the builtins above | compiles on a real driver and the geometry is now fed; **not run on a device** |
+| Iris / Sodium 1.16+ (GLSL 330, `texelFetch` on depth attachments, MRT, uniform blocks) | modern attribute/uniform path | compiles; the game feeds these itself, as before |
+
+Unsupported stages and features - geometry, tessellation, compute, image
+load/store, SSBOs - are still rejected with a logged reason rather than silently
+rendering blank. That is deliberate: a pack that needs one of them will not work
+here, and it says so in the log instead of showing you a black screen.
+
 
 ## Shaders actually compile
 
 "Compiles" here means the driver compiled it, not that the shim shrugged:
 
-* `rustgl/crates/shader-translate/tests/mc_shader_fixtures.rs` holds fourteen
+* `rustgl/crates/shader-translate/tests/mc_shader_fixtures.rs` holds twenty
   real shader dialects: vanilla 1.21.10 terrain (vertex + fragment, std140
   uniform blocks), 1.21.10 lightmap, 1.21.7 and 1.20.1 position/colour,
   1.12.2 blur, Iris/OptiFine `gbuffers_terrain` (vertex + fragment) and
@@ -122,10 +194,18 @@ a flagship's problem is thread serialisation - which item 1 addresses.
   anybody will gain.
 * **No device testing.** The changes were verified by the renderer's own tests
   and the host GLES smoke test; they have not been run on a GE8300, an Adreno or
-  a Snapdragon 8 Gen 5.
-* **No rendering change.** These are throughput and latency changes. If a
-  shader or a draw call behaved differently before, it still behaves the same
-  way - the compile-failure logging in particular was moved, not removed.
+  a Snapdragon 8 Gen 5. In particular, no shader pack has been run end to end on
+  a phone: what is verified is that the shaders compile on a real driver and
+  that the geometry and matrices the legacy path reads are fed to it.
+* **The shader-pack work is one round, not a guarantee.** Packs are programs,
+  and there are thousands of them. Six representative ones compile and the
+  legacy builtins are fed from the state the shim already tracks; a pack that
+  reads something the shim does not track will still be wrong, and a pack that
+  needs a stage ES 3.x has no equivalent for will still be rejected.
+* **No rendering change on the modern path.** The performance changes are
+  throughput and latency changes, and programs that use no legacy builtin take
+  exactly the path they took before - the compile-failure logging in particular
+  was moved, not removed.
 * **Not a driver.** This layer does not replace the system GLES libraries and
   does not switch engines mid-process; it forwards to the driver the launcher
   picked.
