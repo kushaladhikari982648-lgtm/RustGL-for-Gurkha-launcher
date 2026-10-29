@@ -555,13 +555,15 @@ fn legacy_locations(program: u32) -> Option<LegacyLocations> {
     let be = crate::backend()?;
     type AttribLoc = unsafe extern "C" fn(u32, *const std::ffi::c_char) -> i32;
     let attrib = crate::driver_fn_cached::<AttribLoc>("glGetAttribLocation")?;
-    let mut attrib_of = |name: &str| -> i32 {
+    let attrib_of = |name: &str| -> i32 {
         match std::ffi::CString::new(name) {
-            Ok(c) => attrib(program, c.as_ptr()),
+            // glGetAttribLocation: the pointer is valid for the call and the name is NUL
+            // terminated by CString. -1 is the "not present" answer, not an error to log.
+            Ok(c) => unsafe { attrib(program, c.as_ptr()) },
             Err(_) => -1,
         }
     };
-    let mut uniform_of = |name: &str| -> i32 {
+    let uniform_of = |name: &str| -> i32 {
         be.uniform_location(ProgramId(program), name).unwrap_or(-1)
     };
     let mut texcoord = [-1i32; 4];
