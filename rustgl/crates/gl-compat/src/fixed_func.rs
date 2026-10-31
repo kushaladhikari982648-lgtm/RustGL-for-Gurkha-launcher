@@ -571,6 +571,7 @@ pub fn map_draw_mode(mode: u32) -> u32 {
     }
 }
 
+#[inline]
 pub fn mvp_matrix() -> [f32; 16] {
     with_ff(|s| {
         let mv = s.modelview.last().copied().unwrap_or_else(Mat4::identity);
@@ -581,6 +582,7 @@ pub fn mvp_matrix() -> [f32; 16] {
 
 /// Current fixed-function matrix for `GL_MODELVIEW_MATRIX` (0x0BA6) / `GL_PROJECTION_MATRIX`
 /// (0x0BA7), so `glGetDoublev` answers from the emulated stack instead of the ES driver.
+#[inline]
 pub fn matrix_for_pname(pname: u32) -> Option<[f32; 16]> {
     with_ff(|s| match pname {
         0x0BA6 => Some(s.modelview.last().copied().unwrap_or_else(Mat4::identity).0),
@@ -595,6 +597,7 @@ pub fn set_active_texture(texture: u32) {
 }
 
 /// Texture coordinate array of unit 1 or 2.
+#[inline]
 pub fn texcoord_unit(unit: usize) -> ArraySnapshot {
     with_ff(|s| match unit {
         1 => snap(&s.texcoord_x[0]),
@@ -609,6 +612,7 @@ pub fn unit_texture_enabled(unit: usize) -> bool {
 }
 
 /// Current texture matrix of unit 0, 1 or 2 (identity when never touched).
+#[inline]
 pub fn texture_matrix(unit: usize) -> [f32; 16] {
     with_ff(|s| {
         let st = match unit {
@@ -620,6 +624,7 @@ pub fn texture_matrix(unit: usize) -> [f32; 16] {
     })
 }
 
+#[inline]
 pub fn modelview_matrix() -> [f32; 16] {
     with_ff(|s| s.modelview.last().copied().unwrap_or_else(Mat4::identity).0)
 }
@@ -635,6 +640,7 @@ pub struct FogSnapshot {
 }
 
 /// `None` when fog is disabled or the mode is not one fixed-function fog defines.
+#[inline]
 pub fn fog() -> Option<FogSnapshot> {
     with_ff(|s| {
         if !s.fog_enabled {
@@ -708,6 +714,7 @@ pub fn client_vertex_enabled() -> bool {
     with_ff(|s| s.vertex.enabled)
 }
 
+#[inline]
 pub fn current_color() -> [f32; 4] {
     with_ff(|s| s.color4)
 }
@@ -784,20 +791,24 @@ pub struct ArraySnapshot {
     pub buffer: u32,
 }
 
+#[inline]
 fn snap(a: &ClientArray) -> ArraySnapshot {
     ArraySnapshot { size: a.size, ty: a.ty, stride: a.stride, ptr: a.ptr, enabled: a.enabled, buffer: a.buffer }
 }
 
 /// (vertex, color, texcoord) arrays.
+#[inline]
 pub fn arrays() -> (ArraySnapshot, ArraySnapshot, ArraySnapshot) {
     with_ff(|s| (snap(&s.vertex), snap(&s.color), snap(&s.texcoord)))
 }
 
 /// The tracked normal array (`glNormalPointer`), for shaders that read `gl_Normal`.
+#[inline]
 pub fn normal_array() -> ArraySnapshot {
     with_ff(|s| snap(&s.normal))
 }
 
+#[inline]
 pub fn alpha() -> (u32, f32) {
     with_ff(|s| s.alpha_func)
 }
@@ -806,6 +817,7 @@ pub fn alpha() -> (u32, f32) {
 pub fn set_current_texcoord(unit: usize, s: f32, t: f32) {
     with_ff(|state| { if let Some(uv) = state.current_uv.get_mut(unit) { *uv = [s, t]; } });
 }
+#[inline]
 pub fn current_texcoord(unit: usize) -> [f32; 2] {
     with_ff(|state| state.current_uv.get(unit).copied().unwrap_or([0.0; 2]))
 }

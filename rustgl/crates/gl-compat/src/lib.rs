@@ -1391,6 +1391,7 @@ pub unsafe extern "C" fn glGetShaderiv(shader: u32, pname: u32, params: *mut i32
 static CURRENT_PROGRAM: AtomicU32 = AtomicU32::new(0);
 
 /// The program the game has bound, or 0 when it is drawing fixed-function.
+#[inline]
 pub(crate) fn current_program() -> u32 {
     CURRENT_PROGRAM.load(Ordering::Relaxed)
 }

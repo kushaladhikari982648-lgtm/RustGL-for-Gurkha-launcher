@@ -99,6 +99,32 @@ on. The index buffer is now cached and only grows; a second quad draw of the
 same or smaller size uploads nothing, and a larger one reuses the first run's
 indices rather than rebuilding them from scratch.
 
+### 7. No `glGetError` per draw (`crates/gl-compat/src/fixed_draw.rs`)
+
+Both fixed-function draw paths asked the driver for the error state after every
+draw. `glGetError` has to flush pending work to collect errors, and on a
+tile-based GPU that means draining tile memory - so it was a pipeline stall per
+draw, paid on the slowest hardware to produce a log line nobody reads. It is now
+sampled: the first draw, then one in 256. A persistent error still surfaces
+within a frame or two; the cost is a 256th of what it was.
+
+### 8. 16-bit quad indices (`crates/gl-compat/src/fixed_draw.rs`)
+
+ES has no `GL_QUADS`, so quads are expanded into triangle indices, and those
+indices were 32-bit. Any quad draw whose vertex count fits in 16 bits -
+everything except a very large batch - now uploads `GL_UNSIGNED_SHORT` indices
+instead: half the index bandwidth per draw, on parts (PowerVR GE8300, older
+Adreno) that are bandwidth bound long before they are ALU bound. The 32-bit
+buffer is still there for draws that need it, and both are cached and only ever
+grown. Uploaded once and read many times, so they are `GL_STATIC_DRAW` now
+rather than the `GL_STREAM_DRAW` a per-draw upload wanted.
+
+Also in this round: `#[inline]` on the state getters the draw path calls (the
+fixed-function array and matrix snapshots, the tracked current program) and
+`#[cold] #[inline(never)]` on the error-reporting path, so the slow branch does
+not sit in the middle of the fast one.
+
+
 ## Scaling from a GE8300 to a Snapdragon 8 Gen 5
 
 One binary, no device list. The renderer already discovers what the driver can
@@ -185,6 +211,34 @@ here, and it says so in the log instead of showing you a black screen.
   it asserts that an unsupported stage (a geometry shader) *fails* instead of
   silently becoming a blank shader.
 * CI runs that on every push (`Renderer tests (host, Mesa GLES)`).
+
+## Optimizations that do not belong in this layer
+
+Checklists for a fast Minecraft renderer are mostly about the renderer, and this
+repository is a **compatibility layer**: `librust_gl.so` receives desktop OpenGL
+calls from the game, rewrites what ES cannot express, and forwards to the GLES
+driver the launcher chose. It does not own the render loop, the window, the
+world, or the JVM. Concretely:
+
+| Item | Why it is not here |
+|---|---|
+| Vulkan: pipelines, descriptor sets, fences, swapchain, sync2, transient attachments, presentation mode | There is no Vulkan context. Adding one means writing the renderer (MobileGL / LTW's job), not a shim. The equivalent wins available here are "resolve every driver entry point once" and "never query, always track", which items 1, 2, 5 and 7 do. |
+| Greedy meshing, chunk section size, render distance, frustum/occlusion culling, palettes, dirty bitmasks, upload budgets | Those are Minecraft's data. This layer sees `glBufferData` and `glDrawElements`; it never sees a block. |
+| JNI batching, GC/pooling, `mimalloc`, thread affinity, `sched_setaffinity`, Swappy/ADPF, frame pacing, present timing | The launcher owns the JVM, the threads and the swap. A `#[global_allocator]` inside a `.so` the JVM loaded would also add a second allocator to a process that is memory constrained to begin with. |
+| `rayon` / `crossbeam` work stealing, `bevy_ecs` | No task graph to schedule: the work here is one GL call at a time on threads the game owns. The one place concurrency mattered (the base-vertex staging pool) uses a thread-local pool instead, which needs no locking at all. |
+| Shaderc / SPIR-V / `inline-spirv` | The output is GLSL ES, not SPIR-V. The analogue - never translate the same source twice - is item 2, and the cache is bounded (entry count and byte budget, FIFO eviction) so a 768 MB 32-bit process cannot be drained by shader text. |
+| 32-bit heap caps | Partly here and partly not: this layer's own caches are all bounded (shader translations, shader sources at 32, driver entry points, pooled staging buffers), but the heap that matters belongs to the JVM. |
+
+Two pieces of general advice that *were* deliberately not applied, and why:
+
+* **`Box<dyn Backend>` -> enum dispatch.** Every forwarded call already pays a
+  `RwLock` read and a hash lookup to find the driver pointer next to it; the
+  vtable load is the smaller half of that pair, and the refactor would touch
+  every call site in the crate.
+* **`mediump` by default in fragment shaders.** Real bandwidth and ALU win on
+  PowerVR, and real risk of z-fighting and banding in Minecraft's world-space
+  maths. It needs a device to test on before it is worth doing.
+
 
 ## What is not claimed
 

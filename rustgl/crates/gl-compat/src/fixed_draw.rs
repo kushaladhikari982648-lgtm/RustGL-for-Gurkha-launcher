@@ -20,6 +20,8 @@ use std::sync::Mutex;
 const GL_ARRAY_BUFFER: u32 = 0x8892;
 const GL_ELEMENT_ARRAY_BUFFER: u32 = 0x8893;
 const GL_STREAM_DRAW: u32 = 0x88E0;
+const GL_STATIC_DRAW: u32 = 0x88E4;
+const GL_UNSIGNED_SHORT: u32 = 0x1403;
 const GL_VERTEX_ARRAY_BINDING: u32 = 0x85B5;
 const GL_ARRAY_BUFFER_BINDING: u32 = 0x8894;
 const GL_VERTEX_SHADER: u32 = 0x8B31;
@@ -446,18 +448,15 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
 
     if mode == GL_QUADS {
         let quads = (count / 4) as usize;
-        if let Some((buf, need)) = quad_indices(be, quads) {
+        if let Some((buf, ty, need)) = quad_indices(be, quads) {
             be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
-            be.draw_elements(GL_TRIANGLES, need as i32, GL_UNSIGNED_INT, 0);
+            be.draw_elements(GL_TRIANGLES, need, ty, 0);
         }
     } else {
         be.draw_arrays(mode, 0, count);
     }
 
-    let err = be.get_error();
-    if err != 0 && ERRS.fetch_add(1, Ordering::Relaxed) < 20 {
-        crate::log(&format!("[FFDraw] GL error 0x{err:04X} after draw mode=0x{mode:04X} count={count}"));
-    }
+    sample_draw_error(be, "legacy", mode, count);
 
     restore(be, prev_vao, prev_abuf);
     // Restore the game's program (0 = fixed-function / none).
@@ -469,34 +468,87 @@ pub unsafe fn try_draw_arrays(mode: u32, first: i32, count: i32) -> bool {
     true
 }
 
-/// Index buffer for the GL_QUADS -> triangles expansion, grown instead of rebuilt.
+/// Index buffers for the `GL_QUADS` expansion: a 16-bit and a 32-bit one, each created on
+/// first use and only ever grown.
 ///
-/// 1.12.2 draws its GUI and its chunks as quads, so the old code allocated a `Vec` and
-/// uploaded it on every single draw: hundreds of allocations and buffer orphans per frame,
-/// on the CPUs that can least afford them. The pattern is a prefix of itself, so a bigger
-/// buffer can serve every smaller draw.
-static QUAD_INDICES: Mutex<Option<(BufferId, usize)>> = Mutex::new(None);
+/// 16-bit indices wherever the vertex count allows: half the index bandwidth of a 32-bit
+/// index on every quad draw, and a GE8300-class part is bandwidth bound long before it is
+/// ALU bound. Minecraft 1.12.2 and older draw chunks, the GUI and the debug overlay as
+/// quads, so this is the common case on exactly the version range the weakest devices run.
+/// The buffer is uploaded once and read many times, hence `GL_STATIC_DRAW` and not the
+/// `GL_STREAM_DRAW` a per-draw upload would want.
+static QUAD_INDICES_16: Mutex<Option<(BufferId, usize)>> = Mutex::new(None);
+static QUAD_INDICES_32: Mutex<Option<(BufferId, usize)>> = Mutex::new(None);
 
-unsafe fn quad_indices(be: &dyn Backend, quads: usize) -> Option<(BufferId, usize)> {
+/// Returns the buffer, the index type and the index count for `quads` quads.
+unsafe fn quad_indices(be: &dyn Backend, quads: usize) -> Option<(BufferId, u32, i32)> {
     let need = quads * 6;
-    let mut slot = QUAD_INDICES.lock().unwrap_or_else(|e| e.into_inner());
-    let (buf, have) = match *slot {
-        Some(cached) => cached,
-        None => (be.create_buffer().ok()?, 0usize),
-    };
-    if have < need {
-        let mut idx: Vec<u32> = Vec::with_capacity(need);
-        for q in 0..quads {
-            let b = (q * 4) as u32;
-            idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+    if quads * 4 <= u16::MAX as usize {
+        let mut slot = QUAD_INDICES_16.lock().unwrap_or_else(|e| e.into_inner());
+        let (buf, have) = match *slot {
+            Some(cached) => cached,
+            None => (be.create_buffer().ok()?, 0usize),
+        };
+        if have < need {
+            let mut idx: Vec<u16> = Vec::with_capacity(need);
+            for q in 0..quads {
+                let b = (q * 4) as u16;
+                idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+            }
+            // SAFETY: reinterpreting a live Vec<u16> as bytes (same allocation, len * 2).
+            let bytes = std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * 2);
+            be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
+            be.buffer_data(GL_ELEMENT_ARRAY_BUFFER, bytes, GL_STATIC_DRAW).ok()?;
+            *slot = Some((buf, need));
         }
-        // SAFETY: reinterpreting a live Vec<u32> as bytes (same allocation, len * 4).
-        let bytes = std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * 4);
-        be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
-        be.buffer_data(GL_ELEMENT_ARRAY_BUFFER, bytes, GL_STREAM_DRAW).ok()?;
-        *slot = Some((buf, need));
+        Some((buf, GL_UNSIGNED_SHORT, need as i32))
+    } else {
+        let mut slot = QUAD_INDICES_32.lock().unwrap_or_else(|e| e.into_inner());
+        let (buf, have) = match *slot {
+            Some(cached) => cached,
+            None => (be.create_buffer().ok()?, 0usize),
+        };
+        if have < need {
+            let mut idx: Vec<u32> = Vec::with_capacity(need);
+            for q in 0..quads {
+                let b = (q * 4) as u32;
+                idx.extend_from_slice(&[b, b + 1, b + 2, b, b + 2, b + 3]);
+            }
+            // SAFETY: reinterpreting a live Vec<u32> as bytes (same allocation, len * 4).
+            let bytes = std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * 4);
+            be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
+            be.buffer_data(GL_ELEMENT_ARRAY_BUFFER, bytes, GL_STATIC_DRAW).ok()?;
+            *slot = Some((buf, need));
+        }
+        Some((buf, GL_UNSIGNED_INT, need as i32))
     }
-    Some((buf, need))
+}
+
+/// Draws are only error-checked every 256th call.
+///
+/// `glGetError` has to flush the driver's pending work to collect errors, which on a
+/// tile-based GPU means draining tile memory - once per draw that is a stall per draw.
+/// Sampling costs a 256th of that and still reports a persistent error within a frame or
+/// two; the trade is that the error reported by a sample may have been raised by an earlier
+/// draw, which is acceptable for a diagnostic that exists to point at the failing path.
+static ERROR_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+#[cold]
+#[inline(never)]
+fn report_draw_error(be: &dyn Backend, tag: &str, mode: u32, count: i32) {
+    let err = be.get_error();
+    if err != 0 && ERRS.fetch_add(1, Ordering::Relaxed) < 20 {
+        crate::log(&format!(
+            "[FFDraw] GL error 0x{err:04X} after a {tag} draw mode=0x{mode:04X} count={count}"
+        ));
+    }
+}
+
+fn sample_draw_error(be: &dyn Backend, tag: &str, mode: u32, count: i32) {
+    let n = ERROR_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    if n == 0 || n % 256 == 0 {
+        report_draw_error(be, tag, mode, count);
+    }
 }
 
 /// Attribute and uniform locations of the legacy fixed-function builtins in a linked program.
@@ -715,20 +767,15 @@ unsafe fn draw_arrays_with_program(
 
     if mode == GL_QUADS {
         let quads = (count / 4) as usize;
-        if let Some((buf, need)) = quad_indices(be, quads) {
+        if let Some((buf, ty, need)) = quad_indices(be, quads) {
             be.bind_buffer(GL_ELEMENT_ARRAY_BUFFER, Some(buf));
-            be.draw_elements(GL_TRIANGLES, need as i32, GL_UNSIGNED_INT, 0);
+            be.draw_elements(GL_TRIANGLES, need, ty, 0);
         }
     } else {
         be.draw_arrays(mode, 0, count);
     }
 
-    let err = be.get_error();
-    if err != 0 && ERRS.fetch_add(1, Ordering::Relaxed) < 20 {
-        crate::log(&format!(
-            "[FFDraw] GL error 0x{err:04X} after a legacy-shader draw mode=0x{mode:04X} count={count}"
-        ));
-    }
+    sample_draw_error(be, "legacy-shader", mode, count);
     be.bind_buffer(
         GL_ARRAY_BUFFER,
         if prev_abuf > 0 { Some(BufferId(prev_abuf as u32)) } else { None },

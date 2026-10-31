@@ -18,7 +18,7 @@
     {
       "path": "crates/gl-compat/src/lib.rs",
       "upstreamBlob": "91c8b7fd74437f60ba97a5b8f889f886f24e08a3",
-      "summary": "driver entry-point cache takes a shared read lock on the hit path; shader translation results are memoized; compile/link status is read lazily (glGetShaderiv/glGetProgramiv) when the driver supports GL_KHR_parallel_shader_compile; glUseProgram/glDeleteProgram track the current program so the draw paths do not query it per draw."
+      "summary": "driver entry-point cache takes a shared read lock on the hit path; shader translation results are memoized under a bounded cache; compile/link status is read lazily (glGetShaderiv/glGetProgramiv) when the driver supports GL_KHR_parallel_shader_compile; glUseProgram/glDeleteProgram track the current program so the draw paths do not query it per draw; GLSL-only extensions shader packs probe for are advertised under their own tested table."
     },
     {
       "path": "crates/gl-compat/src/gl/v3_3.rs",
@@ -28,12 +28,12 @@
     {
       "path": "crates/gl-compat/src/fixed_draw.rs",
       "upstreamBlob": "2c76bb5e983a09a45483cc893a5b729d6f087d56",
-      "summary": "feeds the legacy fixed-function builtins (gl_Vertex, gl_Color, gl_Normal, gl_MultiTexCoord0..2 and the matrix stacks) as attributes and uniforms when the game draws its fixed-function arrays with its own program, which is how OptiFine and other shader packs draw; also reuses the GL_QUADS index buffer and skips the per-draw GL_CURRENT_PROGRAM query."
+      "summary": "feeds the legacy fixed-function builtins (gl_Vertex, gl_Color, gl_Normal, gl_MultiTexCoord0..2 and the matrix stacks) as attributes and uniforms when the game draws its fixed-function arrays with its own program, which is how OptiFine and other shader packs draw; reuses the GL_QUADS index buffer as 16-bit indices where the vertex count allows, samples glGetError instead of flushing the pipeline per draw, and skips the per-draw GL_CURRENT_PROGRAM query."
     },
     {
       "path": "crates/gl-compat/src/fixed_func.rs",
       "upstreamBlob": "2263be508dfb0bcae920a81653d4eb48535e3c1c",
-      "summary": "exposes the tracked normal array so shaders reading gl_Normal can be fed."
+      "summary": "exposes the tracked normal array so shaders reading gl_Normal can be fed, and marks the state getters the draw path calls every frame #[inline]."
     },
     {
       "path": "crates/gl-compat/src/gles3/mod.rs",
