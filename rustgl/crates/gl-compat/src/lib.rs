@@ -30,6 +30,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
 use std::collections::HashMap;
+use std::time::Instant;
 
 
 const GL_INVALID_VALUE: u32 = 0x0501;
@@ -3343,9 +3344,163 @@ egl_export!(eglWaitNative(engine: i32) -> u32);
 egl_export!(eglQueryContext(dpy: *mut c_void, ctx: *mut c_void, attr: i32, value: *mut i32) -> u32);
 egl_export!(eglQueryAPI() -> u32);
 
+// =============================================================================
+// Frame timing (`RENDERER_FRAME_STATS=1`)
+//
+// The one performance measurement this layer can take on its own: it re-exports EGL, so
+// every presented frame passes through `eglSwapBuffers` below. What it reports is where the
+// time between two presents goes - the frame interval - and how much of that was spent
+// *inside* the swap, which is where a driver waits for the GPU.
+// =============================================================================
+
+/// Intervals kept for the percentiles. 240 is ~4 s at 60 fps and ~8 s at 30 fps: long
+/// enough for a p99 to mean something, short enough to live in a fixed array.
+const FRAME_SAMPLES: usize = 240;
+/// An interval this long is a hitch - a backgrounded app, a shader compiled on the main
+/// thread - and is counted separately instead of dragging the percentiles around.
+const FRAME_HITCH_NS: u64 = 100_000_000;
+/// The 30 fps budget. That is the target on the hardware at the bottom of the range; a
+/// stable 30 beats an oscillating 45 on a phone.
+const FRAME_BUDGET_NS: u64 = 33_333_333;
+
+struct FrameRing {
+    /// Fixed arrays, filled once and overwritten: no allocation in the render loop, ever.
+    intervals: [u64; FRAME_SAMPLES],
+    /// Time spent inside `eglSwapBuffers` itself: the back-pressure signal. A driver that
+    /// has to wait for the GPU shows it here, not in the interval.
+    blocked: [u64; FRAME_SAMPLES],
+    len: usize,
+    next: usize,
+    frames: u64,
+    last_swap: Option<Instant>,
+}
+
+impl FrameRing {
+    const fn new() -> Self {
+        Self {
+            intervals: [0; FRAME_SAMPLES],
+            blocked: [0; FRAME_SAMPLES],
+            len: 0,
+            next: 0,
+            frames: 0,
+            last_swap: None,
+        }
+    }
+
+    fn push(&mut self, interval: u64, blocked: u64) {
+        self.intervals[self.next] = interval;
+        self.blocked[self.next] = blocked;
+        self.next = (self.next + 1) % FRAME_SAMPLES;
+        if self.len < FRAME_SAMPLES {
+            self.len += 1;
+        }
+        self.frames += 1;
+    }
+
+    /// The samples recorded so far, in arrival order; percentiles do not care about order.
+    fn samples(&self) -> (&[u64], &[u64]) {
+        (&self.intervals[..self.len], &self.blocked[..self.len])
+    }
+}
+
+static FRAME_STATS: Mutex<FrameRing> = Mutex::new(FrameRing::new());
+
+/// Read once: the enabled check on the hot path is a load and a branch.
+fn frame_stats_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| matches!(std::env::var("RENDERER_FRAME_STATS").as_deref(), Ok("1")))
+}
+
+/// Nearest-rank percentile of a sorted, non-empty slice: p50 of ten samples is the fifth.
+/// Simple and stable enough to compare two runs, which is what it is for.
+fn percentile(sorted: &[u64], pct: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = ((sorted.len() * pct + 99) / 100).max(1).min(sorted.len());
+    sorted[rank - 1]
+}
+
+struct FrameSummary {
+    frames: usize,
+    p50_ns: u64,
+    p95_ns: u64,
+    p99_ns: u64,
+    blocked_p50_ns: u64,
+    blocked_p95_ns: u64,
+    over_budget: usize,
+    hitches: usize,
+}
+
+fn summarize(ring: &FrameRing) -> Option<FrameSummary> {
+    let (intervals, blocked) = ring.samples();
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut intervals = intervals.to_vec();
+    intervals.sort_unstable();
+    let mut blocked = blocked.to_vec();
+    blocked.sort_unstable();
+    Some(FrameSummary {
+        frames: intervals.len(),
+        p50_ns: percentile(&intervals, 50),
+        p95_ns: percentile(&intervals, 95),
+        p99_ns: percentile(&intervals, 99),
+        blocked_p50_ns: percentile(&blocked, 50),
+        blocked_p95_ns: percentile(&blocked, 95),
+        over_budget: intervals.iter().filter(|t| **t > FRAME_BUDGET_NS).count(),
+        hitches: intervals.iter().filter(|t| **t > FRAME_HITCH_NS).count(),
+    })
+}
+
+#[cold]
+#[inline(never)]
+fn report_frame_stats(ring: &FrameRing) {
+    let Some(summary) = summarize(ring) else {
+        return;
+    };
+    let fps = if summary.p50_ns > 0 {
+        1e9 / summary.p50_ns as f64
+    } else {
+        0.0
+    };
+    let ms = |ns: u64| ns as f64 / 1e6;
+    log(&format!(
+        "[FrameStats] {} frames ({} since start): p50 {:.1}ms ({:.1} fps) p95 {:.1}ms p99 {:.1}ms \
+         | swap wait p50 {:.1}ms p95 {:.1}ms | over 33.3ms: {} ({:.0}%) | hitches >100ms: {}",
+        summary.frames,
+        ring.frames,
+        ms(summary.p50_ns),
+        fps,
+        ms(summary.p95_ns),
+        ms(summary.p99_ns),
+        ms(summary.blocked_p50_ns),
+        ms(summary.blocked_p95_ns),
+        summary.over_budget,
+        100.0 * summary.over_budget as f64 / summary.frames as f64,
+        summary.hitches,
+    ));
+}
+
+/// Called with the instant the swap was entered; the first frame only sets the baseline.
+fn record_frame(entered: Instant) {
+    let blocked = Instant::now().saturating_duration_since(entered).as_nanos() as u64;
+    let mut ring = FRAME_STATS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(last) = ring.last_swap {
+        let interval = entered.saturating_duration_since(last).as_nanos() as u64;
+        ring.push(interval, blocked);
+        if ring.frames % FRAME_SAMPLES as u64 == 0 {
+            report_frame_stats(&ring);
+        }
+    }
+    ring.last_swap = Some(entered);
+}
+
 /// Custom `eglSwapBuffers` that draws the debug overlay before presenting.
 #[no_mangle]
 pub unsafe extern "C" fn eglSwapBuffers(dpy: *mut c_void, surface: *mut c_void) -> u32 {
+    let timed = frame_stats_enabled();
+    let entered = if timed { Some(Instant::now()) } else { None };
     // Draw overlay if enabled.
     if overlay::is_enabled() {
         let cfg = renderer_core::Config::from_env();
@@ -3354,10 +3509,14 @@ pub unsafe extern "C" fn eglSwapBuffers(dpy: *mut c_void, surface: *mut c_void) 
     }
     // Forward to system EGL.
     type F = unsafe extern "C" fn(*mut c_void, *mut c_void) -> u32;
-    match egl_sym::<F>(b"eglSwapBuffers\0") {
+    let presented = match egl_sym::<F>(b"eglSwapBuffers\0") {
         Some(f) => f(dpy, surface),
         None => 0x3001, // EGL_NOT_INITIALIZED
+    };
+    if let Some(entered) = entered {
+        record_frame(entered);
     }
+    presented
 }
 
 /// eglGetProcAddress: our GL symbols first, then system EGL.
