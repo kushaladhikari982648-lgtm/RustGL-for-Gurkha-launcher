@@ -3584,6 +3584,55 @@ mod tests {
     }
 
     #[test]
+    fn frame_percentiles_are_nearest_rank() {
+        assert_eq!(percentile(&[], 50), 0, "no samples");
+        assert_eq!(percentile(&[7], 99), 7, "one sample");
+        let s = [1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        assert_eq!(percentile(&s, 50), 5);
+        assert_eq!(percentile(&s, 95), 10);
+        assert_eq!(percentile(&s, 99), 10);
+    }
+
+    #[test]
+    fn frame_ring_keeps_only_the_most_recent_samples() {
+        let mut ring = FrameRing::new();
+        for i in 1..=FRAME_SAMPLES as u64 + 10 {
+            ring.push(i * 1_000_000, 0);
+        }
+        assert_eq!(ring.len, FRAME_SAMPLES, "the window is bounded");
+        assert_eq!(ring.frames, FRAME_SAMPLES as u64 + 10, "the total is not");
+        let (intervals, _) = ring.samples();
+        assert_eq!(intervals.len(), FRAME_SAMPLES);
+        assert!(!intervals.contains(&1_000_000), "the oldest sample is gone");
+        assert!(intervals.contains(&((FRAME_SAMPLES as u64 + 10) * 1_000_000)));
+    }
+
+    #[test]
+    fn frame_summary_counts_the_frames_that_missed_the_budget() {
+        let mut ring = FrameRing::new();
+        // Nine frames inside the 30 fps budget, then one 120 ms hitch, ten times over.
+        for i in 0..100u64 {
+            let interval = if i % 10 == 0 { 120_000_000 } else { 16_000_000 };
+            ring.push(interval, 1_000_000);
+        }
+        let s = summarize(&ring).expect("samples were recorded");
+        assert_eq!(s.frames, 100);
+        assert_eq!(s.p50_ns, 16_000_000, "half the frames are on budget");
+        assert_eq!(s.over_budget, 10);
+        assert_eq!(s.hitches, 10);
+        assert_eq!(s.blocked_p50_ns, 1_000_000);
+    }
+
+    #[test]
+    fn a_stalled_frame_is_not_counted_as_a_frame() {
+        // The first swap only sets the baseline: there is no interval to report yet.
+        let mut ring = FrameRing::new();
+        assert!(summarize(&ring).is_none());
+        ring.push(16_000_000, 0);
+        assert_eq!(summarize(&ring).map(|s| s.frames), Some(1));
+    }
+
+    #[test]
     fn push_extension_dedups_and_terminates() {
         let mut out: Vec<Vec<u8>> = Vec::new();
         push_extension(&mut out, b"GL_ARB_sync");

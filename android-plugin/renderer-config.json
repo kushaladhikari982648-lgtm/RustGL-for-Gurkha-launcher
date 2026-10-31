@@ -64,6 +64,21 @@
           "1"
         ]
       }
+    },
+    {
+      "type": "SelectableEnv",
+      "key": "RENDERER_FRAME_STATS",
+      "title": {
+        "key": "rustgl_framestats_title"
+      },
+      "check": null,
+      "items": {
+        "defaultValue": "0",
+        "values": [
+          "0",
+          "1"
+        ]
+      }
     }
   ],
   "minMCVer": null,

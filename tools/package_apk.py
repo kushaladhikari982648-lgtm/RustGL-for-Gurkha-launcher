@@ -57,6 +57,7 @@ TITLES = {
     "rustgl_spoof_title": "Report OpenGL 4.5 core to the game (needed by most mods)",
     "rustgl_debug_title": "RustGL draw diagnostics (slow)",
     "rustgl_trace_title": "Trace every GL call (very slow, log only)",
+    "rustgl_framestats_title": "Log frame-time percentiles (p50/p95/p99, log only)",
 }
 
 PACKAGE_NAME = "np.com.gurkha.rustgl.plugin"

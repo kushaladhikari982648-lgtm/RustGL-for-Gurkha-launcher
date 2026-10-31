@@ -30,8 +30,8 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="np.com.gurkha.rustgl.plugin"
-    android:versionCode="5"
-    android:versionName="0.3.0-gurkha.5">
+    android:versionCode="6"
+    android:versionName="0.3.0-gurkha.6">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
@@ -69,6 +69,12 @@
         <meta-data
             android:name="rustgl_trace_title"
             android:resource="@string/rustgl_trace_title" />
+
+        <!-- Frame-time percentiles in the log (p50/p95/p99). Two clock reads per
+             frame when on, nothing at all when off. -->
+        <meta-data
+            android:name="rustgl_framestats_title"
+            android:resource="@string/rustgl_framestats_title" />
         <meta-data
             android:name="rustgl_spoof_title"
             android:resource="@string/rustgl_spoof_title" />

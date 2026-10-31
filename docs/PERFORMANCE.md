@@ -125,6 +125,32 @@ fixed-function array and matrix snapshots, the tracked current program) and
 not sit in the middle of the fast one.
 
 
+### 9. Frame-time percentiles, so the next claim can be measured (`crates/gl-compat/src/lib.rs`)
+
+Every documented number above is a cost removed, not a frame rate gained, because nothing
+here has been run on a phone. That is now fixable by whoever has the phone: `librust_gl.so`
+re-exports EGL, so every presented frame goes through its `eglSwapBuffers`, and with
+`RENDERER_FRAME_STATS=1` it times them.
+
+```
+[FrameStats] 240 frames (1440 since start): p50 16.7ms (59.9 fps) p95 22.4ms p99 41.0ms | swap wait p50 2.1ms p95 7.3ms | over 33.3ms: 6 (2%) | hitches >100ms: 1
+```
+
+* **p50 / p95 / p99 intervals** are the time between two presented frames - what the player
+  feels. A p50 that is fine and a p99 that is not is stutter, and no average will show it.
+* **swap wait** is the time spent *inside* `eglSwapBuffers`. High there means the driver is
+  waiting on the GPU (shader or fill rate); low there with a high interval means the CPU -
+  the game, or this layer - is the one running late.
+* **over 33.3 ms** is the 30 fps budget, which is the honest target on a GE8300: a stable 30
+  beats an oscillating 45.
+* **hitches > 100 ms** are counted separately (backgrounded app, a shader compiled on the
+  main thread) instead of dragging the percentiles around.
+
+Reported once per 240 frames (~4 s at 60 fps, ~8 s at 30). The samples live in a fixed-size
+ring of `u64`s, so the render loop allocates nothing; off by default, and when it is off the
+cost is one cached environment read and a branch per frame.
+
+
 ## Scaling from a GE8300 to a Snapdragon 8 Gen 5
 
 One binary, no device list. The renderer already discovers what the driver can
